@@ -1,0 +1,39 @@
+# Python cache/build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Data, checkpoints, models
+datasets/
+*/datasets/
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+
+# Generated outputs/figures/logs
+outputs/
+outputs_*/
+*/outputs/
+*/outputs_*/
+vis_results/
+*/vis_results/
+test_output*/
+*/test_output*/
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+*.csv
+*.log
+
+# Jupyter artifacts
+.ipynb_checkpoints/

@@ -1,0 +1,29 @@
+# Python cache/build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local environments
+.venv/
+venv/
+
+# Data, checkpoints, and generated outputs
+datasets/
+outputs/
+heat/outputs/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+
+# Plots and logs
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
+*.csv
+*.log

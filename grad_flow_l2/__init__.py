@@ -1,0 +1,63 @@
+"""grad_flow_l2 package exports."""
+
+from .data import (
+    DATASET_VERSION,
+    HeatTrajectoryDataset,
+    HeatTrajectoryTensorDataset,
+    build_dataset_meta,
+    build_trajectory_dataset_from_split,
+    build_step_dataset,
+    generate_dataset_splits,
+    generate_heat_trajectory_batch,
+    load_dataset_splits,
+    plot_trajectory_samples,
+    prepare_or_load_dataset_splits,
+    sample_field_mixed,
+    sample_grf_1d,
+    sample_sinusoidal_1d,
+    save_dataset_splits,
+    validate_split_dirichlet_u0,
+)
+from .generator import EnergyHead1D, GradientFlowModel, ProximalMap1D
+from .trainer import GradientFlowTrainer
+from .utils import (
+    build_laplacian_1d_dirichlet,
+    check_dirichlet_1d,
+    compute_relative_l2_error,
+    implicit_euler_heat_step,
+    pad_dirichlet_1d,
+    prepare_implicit_matrix,
+    rollout_model,
+    solve_heat_trajectory,
+)
+
+__all__ = [
+    "sample_grf_1d",
+    "sample_sinusoidal_1d",
+    "sample_field_mixed",
+    "generate_heat_trajectory_batch",
+    "DATASET_VERSION",
+    "HeatTrajectoryDataset",
+    "HeatTrajectoryTensorDataset",
+    "build_dataset_meta",
+    "build_trajectory_dataset_from_split",
+    "build_step_dataset",
+    "generate_dataset_splits",
+    "prepare_or_load_dataset_splits",
+    "validate_split_dirichlet_u0",
+    "plot_trajectory_samples",
+    "save_dataset_splits",
+    "load_dataset_splits",
+    "build_laplacian_1d_dirichlet",
+    "pad_dirichlet_1d",
+    "check_dirichlet_1d",
+    "prepare_implicit_matrix",
+    "implicit_euler_heat_step",
+    "solve_heat_trajectory",
+    "compute_relative_l2_error",
+    "rollout_model",
+    "EnergyHead1D",
+    "ProximalMap1D",
+    "GradientFlowModel",
+    "GradientFlowTrainer",
+]
