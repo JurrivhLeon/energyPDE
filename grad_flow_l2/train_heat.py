@@ -14,22 +14,22 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 try:
-    from .data import (
+    from .heat_data import (
         build_step_dataset,
         build_trajectory_dataset_from_split,
         load_dataset_splits,
     )
     from .generator import EnergyHead1D, GradientFlowModel, ProximalMap1D
-    from .trainer import GradientFlowTrainer
+    from .trainer_heat import GradientFlowTrainer
 except ImportError:
     # Allow running as a script: python grad_flow_l2/train.py
-    from data import (
+    from grad_flow_l2.heat_data import (
         build_step_dataset,
         build_trajectory_dataset_from_split,
         load_dataset_splits,
     )
     from generator import EnergyHead1D, GradientFlowModel, ProximalMap1D
-    from trainer import GradientFlowTrainer
+    from grad_flow_l2.trainer_heat import GradientFlowTrainer
 
 
 def set_seed(seed: int, seed_cuda: bool = False) -> None:

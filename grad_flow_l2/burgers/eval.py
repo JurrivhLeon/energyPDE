@@ -1,8 +1,8 @@
 """
-Evaluation script for grad_flow_l2 models.
+Evaluation script for hidden-space Burgers models.
 
 Reports:
-1) One-step test MSE.
+1) One-step split MSE.
 2) Rollout error accumulation by step (MSE and relative L2).
 3) Per-sample comparison plots (reference vs prediction + snapshots).
 """
@@ -20,13 +20,25 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 try:
-    from .heat_data import build_step_dataset, build_trajectory_dataset_from_split, load_dataset_splits
-    from .generator import EnergyHead1D, GradientFlowModel, ProximalMap1D
-    from .utils import compute_relative_l2_error, pad_dirichlet_1d, rollout_model
+    from ..heat_data import build_step_dataset, build_trajectory_dataset_from_split, load_dataset_splits
+    from ..generator import (
+        HiddenGradientFlowModel1D,
+        LatentEnergyHead1D,
+        LatentGradientStep1D,
+        LatentStateDecoder1D,
+        LatentStateEncoder1D,
+    )
+    from ..utils import compute_relative_l2_error, pad_dirichlet_1d, rollout_model
 except ImportError:
     from grad_flow_l2.heat_data import build_step_dataset, build_trajectory_dataset_from_split, load_dataset_splits
-    from generator import EnergyHead1D, GradientFlowModel, ProximalMap1D
-    from utils import compute_relative_l2_error, pad_dirichlet_1d, rollout_model
+    from grad_flow_l2.generator import (
+        HiddenGradientFlowModel1D,
+        LatentEnergyHead1D,
+        LatentGradientStep1D,
+        LatentStateDecoder1D,
+        LatentStateEncoder1D,
+    )
+    from grad_flow_l2.utils import compute_relative_l2_error, pad_dirichlet_1d, rollout_model
 
 
 def _parse_snapshot_times(raw: str) -> List[float]:
@@ -40,14 +52,24 @@ def _parse_snapshot_times(raw: str) -> List[float]:
             raise ValueError(f"Snapshot time must be in [0,1], got {v}")
         vals.append(v)
     if not vals:
-        vals = [0.0, 0.25, 0.50, 0.75, 1.0]
+        vals = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     return vals
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a trained grad_flow_l2 model")
-    parser.add_argument("--dataset-path", type=str, default="datasets/heat_l2_nx100_steps10.pt", help="Path to cached precomputed dataset file (.pt)")
-    parser.add_argument("--checkpoint-path", type=str, default="grad_flow_l2/outputs/run_20260304_005025/best_model.pt", help="Path to trained model checkpoint (.pt)")
+    parser = argparse.ArgumentParser(description="Evaluate a trained hidden-space Burgers model")
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default="grad_flow_l2/datasets/burgers_l2_nu0p01_nx100_steps10.pt",
+        help="Path to cached dataset file (.pt)",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        default="grad_flow_l2/burgers/outputs/run_20260305_001234/best_model.pt",
+        help="Path to trained model checkpoint (.pt)",
+    )
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -55,14 +77,19 @@ def parse_args() -> argparse.Namespace:
 
     # Model architecture (must match training config).
     parser.add_argument("--hidden-channels", type=int, default=64)
-    parser.add_argument("--prox-blocks", type=int, default=6)
+    parser.add_argument("--latent-channels", type=int, default=16)
+    parser.add_argument("--enc-blocks", type=int, default=4)
+    parser.add_argument("--dec-blocks", type=int, default=4)
+    parser.add_argument("--latent-blocks", type=int, default=6)
     parser.add_argument("--energy-layers", type=int, default=4)
     parser.add_argument("--use-dt-channel", action="store_true")
+    parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument("--disable-zx-feature", action="store_true")
 
     # Visualization/output.
-    parser.add_argument("--n-plot-samples", type=int, default=10)
-    parser.add_argument("--snapshot-times", type=str, default="0.0,0.20,0.40,0.60,0.80,1.0")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/outputs/eval")
+    parser.add_argument("--n-plot-samples", type=int, default=8)
+    parser.add_argument("--snapshot-times", type=str, default="0.0,0.2,0.4,0.6,0.8,1.0")
+    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/burgers/outputs/eval")
     return parser.parse_args()
 
 
@@ -70,31 +97,51 @@ def _build_model(
     n_x: int,
     h: float,
     dt: float,
-    hidden_channels: int,
-    prox_blocks: int,
-    energy_layers: int,
-    use_dt_channel: bool,
-) -> GradientFlowModel:
-    prox_map = ProximalMap1D(
+    args: argparse.Namespace,
+) -> HiddenGradientFlowModel1D:
+    use_forcing_channel = not args.disable_forcing_channel
+    encoder = LatentStateEncoder1D(
         n_x=n_x,
-        hidden_channels=hidden_channels,
-        n_blocks=prox_blocks,
-        use_dt_channel=use_dt_channel,
-        default_dt=dt,
-    )
-    energy_head = EnergyHead1D(
-        n_x=n_x,
-        h=h,
-        hidden_channels=hidden_channels,
-        n_layers=energy_layers,
+        latent_channels=args.latent_channels,
+        hidden_channels=args.hidden_channels,
+        n_blocks=args.enc_blocks,
         use_ux_feature=True,
     )
-    return GradientFlowModel(prox_map=prox_map, energy_head=energy_head)
+    latent_step = LatentGradientStep1D(
+        n_x=n_x,
+        latent_channels=args.latent_channels,
+        hidden_channels=args.hidden_channels,
+        n_blocks=args.latent_blocks,
+        use_forcing_channel=use_forcing_channel,
+        use_dt_channel=args.use_dt_channel,
+        default_dt=dt,
+    )
+    decoder = LatentStateDecoder1D(
+        n_x=n_x,
+        latent_channels=args.latent_channels,
+        hidden_channels=args.hidden_channels,
+        n_blocks=args.dec_blocks,
+    )
+    latent_energy_head = LatentEnergyHead1D(
+        n_x=n_x,
+        h=h,
+        latent_channels=args.latent_channels,
+        hidden_channels=args.hidden_channels,
+        n_layers=args.energy_layers,
+        use_forcing_channel=use_forcing_channel,
+        use_zx_norm_feature=not args.disable_zx_feature,
+    )
+    return HiddenGradientFlowModel1D(
+        encoder=encoder,
+        latent_step=latent_step,
+        decoder=decoder,
+        latent_energy_head=latent_energy_head,
+    )
 
 
 @torch.no_grad()
 def evaluate_one_step_mse(
-    model: GradientFlowModel,
+    model: HiddenGradientFlowModel1D,
     step_loader: DataLoader,
     device: str,
     dt: float,
@@ -115,7 +162,7 @@ def evaluate_one_step_mse(
 
 @torch.no_grad()
 def evaluate_rollout_curves(
-    model: GradientFlowModel,
+    model: HiddenGradientFlowModel1D,
     traj_loader: DataLoader,
     device: str,
     dt: float,
@@ -139,8 +186,8 @@ def evaluate_rollout_curves(
         u_ref = u_ref.to(device)
 
         u_pred = rollout_model(model, u0=u0, f=f, n_steps=n_steps, dt=dt)
-        mse_t = torch.mean((u_pred - u_ref) ** 2, dim=-1)  # (batch, K+1)
-        rel_t = compute_relative_l2_error(u_pred, u_ref, h=h)  # (batch, K+1)
+        mse_t = torch.mean((u_pred - u_ref) ** 2, dim=-1)
+        rel_t = compute_relative_l2_error(u_pred, u_ref, h=h)
 
         mse_sum += mse_t.sum(dim=0).cpu().numpy()
         rel_sum += rel_t.sum(dim=0).cpu().numpy()
@@ -201,7 +248,7 @@ def _save_curve_csv(
 
 @torch.no_grad()
 def _plot_sample_comparisons(
-    model: GradientFlowModel,
+    model: HiddenGradientFlowModel1D,
     split: Dict[str, torch.Tensor],
     device: str,
     dt: float,
@@ -319,7 +366,6 @@ def _plot_sample_comparisons(
         fig.savefig(out_path, dpi=180)
         plt.close(fig)
 
-        # Optional compact error heatmap next to each sample.
         fig_err, ax_err = plt.subplots(1, 1, figsize=(6, 3.5))
         im_err = ax_err.imshow(
             err_full.numpy(),
@@ -348,22 +394,16 @@ def main(args: argparse.Namespace) -> None:
 
     splits = load_dataset_splits(args.dataset_path, map_location="cpu")
     split = splits[args.split]
+    meta = splits.get("meta", {})
     n_x = int(split["u0"].shape[1])
     n_steps = int(split["u_traj"].shape[1] - 1)
+    t_final = float(meta.get("t_final", 1.0))
     h = 1.0 / float(n_x + 1)
-    dt_from_data = 1.0 / float(n_steps)
+    dt_from_data = t_final / float(n_steps)
     print(f"Loaded split={args.split} from {args.dataset_path}")
-    print(f"Grid: n_x={n_x}, n_steps={n_steps}, h={h:.6f}, dt={dt_from_data:.6f}")
+    print(f"Grid: n_x={n_x}, n_steps={n_steps}, t_final={t_final:.6f}, h={h:.6f}, dt={dt_from_data:.6f}")
 
-    model = _build_model(
-        n_x=n_x,
-        h=h,
-        dt=dt_from_data,
-        hidden_channels=args.hidden_channels,
-        prox_blocks=args.prox_blocks,
-        energy_layers=args.energy_layers,
-        use_dt_channel=args.use_dt_channel,
-    ).to(device)
+    model = _build_model(n_x=n_x, h=h, dt=dt_from_data, args=args).to(device)
 
     ckpt = torch.load(args.checkpoint_path, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
@@ -377,7 +417,7 @@ def main(args: argparse.Namespace) -> None:
     step_loader = DataLoader(step_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     traj_loader = DataLoader(traj_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    test_mse = evaluate_one_step_mse(model, step_loader, device=device, dt=dt_from_data)
+    split_mse = evaluate_one_step_mse(model, step_loader, device=device, dt=dt_from_data)
     curves = evaluate_rollout_curves(
         model,
         traj_loader=traj_loader,
@@ -389,7 +429,7 @@ def main(args: argparse.Namespace) -> None:
     mse_curve = curves["mse_curve"]
     rel_curve = curves["rel_curve"]
 
-    print(f"One-step test MSE: {test_mse:.8e}")
+    print(f"One-step split MSE: {split_mse:.8e}")
     print("Rollout accumulation (step, mse, rel_l2):")
     for k in range(n_steps + 1):
         print(f"  {k:03d}  {mse_curve[k]:.8e}  {rel_curve[k]:.8e}")

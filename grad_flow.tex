@@ -1,0 +1,811 @@
+\pdfoutput=1
+\documentclass[11pt]{article}
+\usepackage[OT1]{fontenc}
+\usepackage{smile}
+\usepackage{subcaption}
+\usepackage[margin=1in]{geometry}
+\renewcommand{\baselinestretch}{1.20}
+%%%%%%%%%%%%-- Comments --%%%%%%%%%%%%
+%%%%%%%%%%%%-- new command --%%%%%%%%%%%%
+
+
+% Custom commands matching your notation
+\newcommand{\calN}{\mathcal{N}}
+\newcommand{\calL}{\mathcal{L}}
+\newcommand{\thetavec}{\bm{\theta}}
+\newcommand{\calA}{\mathcal{A}}
+\newcommand{\bbP}{\mathbb{P}}
+\newcommand{\bbR}{\mathbb{R}}
+\newcommand{\bbE}{\mathbb{E}}
+\newcommand{\Grad}{\mathrm{Grad}}
+\renewcommand{\d}{\mathrm{d}}
+\newcommand{\wh}{\widehat}
+\newcommand{\wt}{\widetilde}
+\newcommand{\ol}{\overline}
+%%%%%%%%%%%%-- start --%%%%%%%%%%%%%%%
+\title{\bf Learning PDE Solution Operators via Transformer-based Models}
+\author{Junyi Liao}
+\date{}
+\begin{document}
+\maketitle
+\section{Gradient-Flow-Based Modeling for Time-Dependent PDEs}
+\label{sec:gradflow_pde}
+
+\paragraph{Setup.}
+Let $\Omega\subset\R^d$ be a bounded domain (with boundary conditions specified below) and let $u(t,\cdot)$ denote the state of a time-dependent PDE on $\Omega$.
+Many dissipative evolution equations admit a \emph{gradient flow} representation
+\begin{equation}
+\label{eq:gf-abstract}
+\partial_t u \;=\; -\,\Grad_{\mathsf G}\,\mathcal E(u;c),
+\end{equation}
+where $\mathcal E(\cdot;c)$ is an energy (Lyapunov) functional and $\mathsf G$ specifies the underlying metric (geometry) on the state space.
+The conditioning variable $c$ encodes the PDE instance, e.g., coefficient fields, forcing, boundary data, etc. Typical examples include:
+\begin{itemize}[itemsep=-2pt,topsep=2pt]
+\item[(i)] spatially varying coefficients $a(x)$ in diffusion operators,
+\item[(ii)] a potential $V(x)$ in Fokker--Planck dynamics, and
+\item[(iii)] representations of the spatial domain and boundary conditions (e.g., coordinate maps, masks, signed-distance functions, or meshes/graphs).
+\end{itemize}
+Accordingly, we view $\mathcal E(u;c)$ as a functional jointly defined by the system state $u$ (time-dependent) and the instance parameters $c$.
+
+\paragraph{First variation and variational derivative.}
+Let $\mathcal E: X\to\R$ be defined on a Banach/Hilbert space $X$ of admissible states (e.g., $L^2(\Omega)$, $H_0^1(\Omega)$, etc.).
+For a perturbation $\phi$ (typically $\phi\in C_c^\infty(\Omega)$ for formal derivations), the \emph{first variation} of $\mathcal E$ at $u$ in direction $\phi$ is the \textit{G\^ateaux derivative}
+\begin{equation}
+\label{eq:first-variation}
+\delta \mathcal E(u;c)[\phi]
+:=
+\left.\frac{d}{d\varepsilon}\right|_{\varepsilon=0}
+\mathcal E(u+\varepsilon\phi;c)
+\;=\;
+\lim_{\varepsilon\to 0}
+\frac{\mathcal E(u+\varepsilon\phi;c)-\mathcal E(u;c)}{\varepsilon},
+\end{equation}
+whenever the limit exists.
+If there exists a function (or distribution) $\frac{\delta \mathcal E}{\delta u}(u;c)$ such that
+\begin{equation}
+\label{eq:variational-derivative}
+\delta \mathcal E(u;c)[\phi]
+\;=\;
+\int_\Omega \frac{\delta \mathcal E}{\delta u}(u;c)(x)\,\phi(x)\,dx
+\qquad \forall \phi,
+\end{equation}
+then $\frac{\delta \mathcal E}{\delta u}$ is called the \emph{variational derivative} of $\mathcal E$.
+
+\paragraph{Metric-dependent gradient $\Grad_{\mathsf G}\mathcal E$.}
+The object $\Grad_{\mathsf G}\mathcal E(u;c)$ in~\eqref{eq:gf-abstract} depends on the chosen metric.
+In a Hilbert space $(X,\langle\cdot,\cdot\rangle_X)$, the \textit{Fr\'echet derivative} $\nabla_X\mathcal E(u;c)\in X$ is defined by the Riesz representation
+\begin{equation}
+\label{eq:riesz}
+\delta\mathcal E(u;c)[\phi]
+\;=\;
+\big\langle \nabla_X\mathcal E(u;c),\,\phi\big\rangle_X
+\qquad \forall \phi\in X.
+\end{equation}
+When $X=L^2(\Omega)$, $\nabla_{L^2}\mathcal E$ coincides with the variational derivative:
+\begin{equation}
+\label{eq:l2-grad}
+\Grad_{L^2}\mathcal E(u;c)
+\;=\;
+\nabla_{L^2}\mathcal E(u;c)
+\;=\;
+\frac{\delta \mathcal E}{\delta u}(u;c).
+\end{equation}
+For other geometries, the gradient is obtained by composing $\frac{\delta\mathcal E}{\delta u}$ with a (typically linear) metric operator.
+For example, in an $H^{-1}$-type geometry one has (formally)
+\begin{equation}
+\label{eq:hminus1-grad}
+\Grad_{H^{-1}}\mathcal E(u;c)
+\;=\;
+-\,\Delta\!\left(\frac{\delta\mathcal E}{\delta u}(u;c)\right),
+\end{equation}
+which yields Cahn--Hilliard-type dynamics.
+In Wasserstein geometry on probability densities $\rho$, the gradient flow takes the form
+\begin{equation}
+\label{eq:w2-gradflow}
+\partial_t \rho
+\;=\;
+\nabla\cdot\!\left(
+\rho\,\nabla \frac{\delta \mathcal F}{\delta \rho}(\rho;c)
+\right),
+\end{equation}
+for a free energy functional $\mathcal F(\rho;c)$.
+
+Following are some examples of gradient flow for second-order parabolic equations.
+\begin{example}[Heat equation]
+Let $a:\Omega\to(0,\infty)$ be a diffusion coefficient and define
+\begin{equation}
+\label{eq:diffusion-energy}
+\mathcal E(u;a)
+\;=\;
+\frac12\int_\Omega a(x)\,|\nabla u(x)|^2\,dx.
+\end{equation}
+A standard computation gives
+\begin{equation}
+\delta\mathcal E(u;a)[\phi]
+=
+\int_\Omega a\,\nabla u\cdot\nabla\phi
+=
+-\int_\Omega \nabla\cdot(a\nabla u)\,\phi,
+\end{equation}
+hence $\frac{\delta\mathcal E}{\delta u}=-\nabla\cdot(a\nabla u)$ and the $L^2$-gradient flow yields
+\begin{equation}
+\label{eq:diffusion-gf}
+\partial_t u
+=
+-\,\Grad_{L^2}\mathcal E(u;a)
+=
+\nabla\cdot(a\nabla u).
+\end{equation}
+\end{example}
+
+\begin{example}[Fokker-Planck]
+For a density $\rho$ on $\R^d$ and a potential $V$, consider the free energy
+\begin{equation}
+\label{eq:free-energy}
+\mathcal F(\rho;V)
+\;=\;
+\int_{\R^d} \rho(x)\log\rho(x)\,dx
++
+\int_{\R^d} V(x)\rho(x)\,dx.
+\end{equation}
+Its first variation satisfies
+\begin{equation}
+\delta\mathcal F(\rho;V)[\phi]
+=
+\int_{\R^d}\big(\log\rho(x)+1+V(x)\big)\,\phi(x)\,dx,
+\end{equation}
+so $\frac{\delta\mathcal F}{\delta\rho}=\log\rho+1+V$. Substituting into~\eqref{eq:w2-gradflow} yields
+\begin{equation}
+\partial_t \rho
+=
+\nabla\cdot\!\left(\rho\nabla(\log\rho+V)\right)
+=
+\Delta\rho+\nabla\cdot(\rho\nabla V).
+\end{equation}
+\end{example}
+
+\paragraph{Proximal step as implicit Euler discretization.}
+Consider an abstract gradient flow in a Hilbert space $(X,\langle\cdot,\cdot\rangle_X)$:
+\[
+\partial_t u(t) = -\,\nabla_X \mathcal E(u(t)),
+\]
+where $\mathcal E:X\to\R$ is a sufficiently smooth energy functional and $\nabla_X \mathcal E$ denotes its gradient with respect to the inner product of $X$.
+Discretizing in time via the implicit (backward) Euler scheme with step size $\tau>0$ gives
+\[
+\frac{u_{k+1}-u_k}{\tau}
+=
+-\,\nabla_X \mathcal E(u_{k+1}).
+\]
+Rearranging,
+\[
+0
+=
+\frac{u_{k+1}-u_k}{\tau}
++
+\nabla_X \mathcal E(u_{k+1}),
+\]
+which is precisely the first-order optimality condition for the minimization problem
+\[
+u_{k+1}
+=
+\arg\min_{v\in X}
+\left\{
+\frac{1}{2\tau}\,\|v-u_k\|_X^2
++
+\mathcal E(v)
+\right\}.
+\]
+Hence, the proximal (minimizing-movement) step is exactly the implicit Euler discretization of a gradient flow.
+In particular, whenever a time-dependent PDE admits a gradient-flow formulation, its natural variational time discretization is given by such a proximal update, which inherits energy-dissipation and stability properties at the discrete level.
+
+%===============================
+% Below Deleted
+%===============================
+\iffalse
+\subsection{Learning Gradient-Flow Dynamics}
+\label{sec:learning_gf}
+
+\paragraph{Energy parameterization.}
+We parameterize the energy functional by $\mathcal E_\theta(u;c)$, where $c$ encodes the PDE instance (coefficients/geometry/boundary data).
+Typical choices include a local energy density model
+\begin{equation}
+\label{eq:local-energy}
+\mathcal E_\theta(u;c)
+=\int_\Omega e_\theta\big(u(x),\nabla u(x),x;c\big)\,dx,
+\end{equation}
+or a neural-operator energy mapping $u\mapsto \mathcal E_\theta(u;c)$ implemented by a Fourier neural operator, transformer operator, or other equivariant architectures.
+
+\paragraph{Discrete-time gradient-flow rollout.}
+Given a time step $\tau>0$, we define a learned explicit gradient-flow update
+\begin{equation}
+\label{eq:explicit-update}
+u_{k+1}
+=
+u_k
+-\tau\,\Grad_{\mathsf G}\mathcal E_\theta(u_k;c),
+\end{equation}
+or, alternatively, an implicit (proximal) update via the minimizing-movement scheme
+\begin{equation}
+\label{eq:prox-update}
+u_{k+1}
+=
+\arg\min_{u}\left\{
+\frac{1}{2\tau}\,d_{\mathsf G}^2(u,u_k)
++
+\mathcal E_\theta(u;c)
+\right\},
+\end{equation}
+where $d_{\mathsf G}$ is the distance induced by the metric $\mathsf G$ (e.g., $L^2$ distance in Hilbert settings, or $W_2$ in Wasserstein settings).
+
+\paragraph{Computing $\Grad_{\mathsf G}\mathcal E_\theta$ in practice.}
+In computations, the field $u$ is discretized (on a grid/mesh/graph), so $\mathcal E_\theta(u;c)$ is a scalar function of a finite-dimensional vector $u\in\R^n$.
+Thus, $\frac{\delta \mathcal E_\theta}{\delta u}$ is approximated by the ordinary gradient $\nabla_u \mathcal E_\theta(u;c)$ obtained via automatic differentiation.
+To incorporate the geometry, we apply a (known or learned) metric operator $\mathcal K_{\mathsf G}$:
+\begin{equation}
+\label{eq:metric-operator}
+\Grad_{\mathsf G}\mathcal E_\theta(u;c)
+\;\approx\;
+\mathcal K_{\mathsf G}\!\left(\nabla_u \mathcal E_\theta(u;c)\right),
+\end{equation}
+where
+\begin{itemize}[itemsep=-2pt,topsep=2pt]
+    \item $\mathcal K_{\mathsf G}=\mathrm{Id}$ for $L^2$ geometry, \item $\mathcal K_{\mathsf G}=-\Delta$ for $H^{-1}$-type geometries (discretized), and 
+    \item $\mathcal K_{\mathsf G}$ corresponds to the Wasserstein continuity-form operator in density settings.
+\end{itemize}
+\fi
+%===============================
+% Above Deleted 
+%===============================
+
+\subsection{Learning Gradient-Flow Dynamics with Coupled Energy and Step Map}
+\label{sec:learning_gf_coupled}
+
+\paragraph{Data and notation.}
+Fix a time step $\tau>0$ and denote $t_k = k\tau$.
+For each PDE instance $c$ (e.g., coefficient field, forcing, boundary/geometry encoding), we assume access to \emph{ground-truth} trajectories produced by a reference solver:
+\[
+u_k^{\mathrm{data}}(\cdot)\;\approx\; u(t_k,\cdot),\qquad k=0,1,\dots,K.
+\]
+We emphasize the distinction between (i) the observed states $(u_k^{\mathrm{data}},u_{k+1}^{\mathrm{data}})$ and (ii) the \emph{model-predicted} next state
+\begin{equation}
+\label{eq:pred-step}
+u_{k+1}^{\mathrm{pred}}
+:=
+\Phi_\theta\!\left(u_k^{\mathrm{data}},\,c;\tau\right),
+\end{equation}
+where $\Phi_\theta$ is a learned (neural-operator) one-step map conditioned on the PDE instance $c$.
+
+\paragraph{Energy head.}
+We parameterize an energy (Lyapunov) functional by $\mathcal E_\psi(u;c)$.
+The role of $\mathcal E_\psi$ is to encode dissipative structure consistent with a gradient-flow interpretation of the dynamics. Typical choices include a local energy density model
+\begin{equation}
+\label{eq:local-energy}
+\mathcal E_\psi(u;c)
+=\int_\Omega e_\psi\big(u(x),\nabla u(x),x;c\big)\,dx,
+\end{equation}
+or a neural-operator energy mapping $u\mapsto \mathcal E_\psi(u;c)$ implemented by a Fourier neural operator, transformer operator, or other equivariant architectures.
+
+Throughout, all energy-structure regularizers are evaluated on \emph{predicted} states so that $\mathcal E_\psi$ actively constrains the learned step map $\Phi_\theta$.
+
+\paragraph{Coupling principle.}
+A key design choice is to couple $(\Phi_\theta,\mathcal E_\psi)$ by applying gradient-flow constraints to the \emph{predicted transition}
+\[
+u_k^{\mathrm{data}} \;\mapsto\; u_{k+1}^{\mathrm{pred}}=\Phi_\theta(u_k^{\mathrm{data}},c;\tau),
+\]
+rather than only to the ground-truth pair $(u_k^{\mathrm{data}},u_{k+1}^{\mathrm{data}})$.
+Without this coupling, $\Phi_\theta$ may fit the data independently while $\mathcal E_\psi$ becomes an unconstrained auxiliary scalar.
+
+\paragraph{One-step supervision.}
+We train $\Phi_\theta$ to match the next-step ground truth:
+\begin{equation}
+\label{eq:loss-step}
+\mathcal L_{\mathrm{step}}(\theta)
+\;=\;
+\sum_{(c,i)}\sum_{k=0}^{K-1}
+\big\|
+u_{k+1}^{\mathrm{data},i}
+-
+u_{k+1}^{\mathrm{pred},i}
+\big\|^2,
+\qquad
+u_{k+1}^{\mathrm{pred},i}=\Phi_\theta(u_k^{\mathrm{data},i},c^{i};\tau),
+\end{equation}
+where $i$ indexes trajectories and instances.
+
+\paragraph{Energy monotonicity on predicted steps.}
+For dissipative gradient flows, the energy is non-increasing along the evolution.
+We impose the corresponding soft constraint on the predicted transition:
+\begin{equation}
+\label{eq:loss-mono-pred}
+\mathcal L_{\mathrm{mono}}(\theta,\psi)
+\;=\;
+\sum_{(c,i)}\sum_{k=0}^{K-1}
+\Big[
+\mathcal E_\psi(u_{k+1}^{\mathrm{pred},i};c^{i})
+-
+\mathcal E_\psi(u_{k}^{\mathrm{data},i};c^{i})
+\Big]_+,
+\qquad [x]_+:= \max\{x,0\}.
+\end{equation}
+
+\paragraph{Discrete dissipation inequality (EDI) on predicted steps.}
+A stronger coupling is obtained from a discrete energy--dissipation inequality.
+Let $d_{\mathsf G}$ denote the distance induced by the metric (geometry) $\mathsf G$ on the state space.
+We penalize violations of the inequality
+\(
+\mathcal E(u_{k+1}) + \frac{1}{2\tau} d_{\mathsf G}^2(u_{k+1},u_k) \le \mathcal E(u_k)
+\)
+using the predicted next state:
+\begin{equation}
+\label{eq:loss-edi-pred}
+\mathcal L_{\mathrm{EDI}}(\theta,\psi)
+\;=\;
+\sum_{(c,i)}\sum_{k=0}^{K-1}
+\Big[
+\mathcal E_\psi(u_{k+1}^{\mathrm{pred},i};c^{i})
++
+\frac{1}{2\tau}\,
+d_{\mathsf G}^2\big(u_{k+1}^{\mathrm{pred},i},\,u_k^{\mathrm{data},i}\big)
+-
+\mathcal E_\psi(u_{k}^{\mathrm{data},i};c^{i})
+\Big]_+.
+\end{equation}
+
+\paragraph{Total training objective.}
+The coupled objective is a weighted combination:
+\begin{equation}
+\label{eq:loss-total-coupled}
+\mathcal L(\theta,\psi)
+\;=\;
+\mathcal L_{\mathrm{step}}(\theta)
++
+\lambda_{\mathrm{mono}}\,\mathcal L_{\mathrm{mono}}(\theta,\psi)
++
+\lambda_{\mathrm{EDI}}\,\mathcal L_{\mathrm{EDI}}(\theta,\psi).
+\end{equation}
+Here $\lambda_{\mathrm{mono}},\lambda_{\mathrm{EDI}}\ge 0$ control the strength of the gradient-flow regularization.
+
+\paragraph{Remarks on the geometry term.}
+The metric $\mathsf G$ determines the distance $d_{\mathsf G}$ and thus the form of the EDI penalty.
+In standard Hilbert settings one may take $d_{\mathsf G}(u,v)=\|u-v\|_{L^2}$, while in measure-valued settings (e.g., Fokker--Planck) one would take $d_{\mathsf G}=W_2$ (or a computational surrogate thereof).
+In practice, the distance is evaluated on a discretization (grid/mesh/particles).
+
+\paragraph{Optional: stronger coupling via an optimality residual.}
+To more directly enforce a proximal interpretation, one may also penalize the implicit Euler optimality condition
+\begin{equation}
+\label{eq:implicit-opt}
+0 \;\approx\; \frac{u_{k+1}-u_k}{\tau} + \Grad_{\mathsf G}\mathcal E_\psi(u_{k+1};c),
+\end{equation}
+evaluated at $(u_k,u_{k+1})=(u_k^{\mathrm{data}},u_{k+1}^{\mathrm{pred}})$:
+\begin{equation}
+\label{eq:loss-optres}
+\mathcal L_{\mathrm{opt}}
+(\theta,\psi)
+=
+\sum_{(c,i)}\sum_{k=0}^{K-1}
+\left\|
+\frac{u_{k+1}^{\mathrm{pred},i}-u_k^{\mathrm{data},i}}{\tau}
++
+\Grad_{\mathsf G}\mathcal E_\psi(u_{k+1}^{\mathrm{pred},i};c^{i})
+\right\|^2.
+\end{equation}
+This term couples $\Phi_\theta$ and $\mathcal E_\psi$ through the metric-dependent gradient operator $\Grad_{\mathsf G}$, and can be used in place of (or in addition to) the hinge-style EDI penalty in~\eqref{eq:loss-edi-pred}.
+
+\paragraph{Summary of roles.}
+We summarize the roles of the key quantities:
+\begin{itemize}[itemsep=-2pt, topsep=2pt]
+\item[(i)] $u_k^{\mathrm{data}},u_{k+1}^{\mathrm{data}}$ are solver-generated reference states;
+\item[(ii)] $u_{k+1}^{\mathrm{pred}}=\Phi_\theta(u_k^{\mathrm{data}},c;\tau)$ is the learned one-step prediction;
+\item[(iii)] $\mathcal E_\psi(\cdot;c)$ is a learned energy functional; and
+\item[(iv)] the coupling between $\Phi_\theta$ and $\mathcal E_\psi$ is enforced by evaluating energy-dissipation constraints on predicted steps.
+\end{itemize}
+
+\subsection{Alternative: Strong Coupling without Proximal Solve}
+\label{sec:gf_regularized_step}
+
+%\paragraph{Motivation.} Solving a proximal minimization problem at all time steps can be computationally expensive, especially for long-horizon rollouts. Instead, we directly parameterize a one-step map $\Phi_\theta$ and use a learned energy functional $\mathcal E_\psi$ as a \emph{structural regularizer}. The goal is to encourage the learned dynamics to align with a gradient-flow structure without requiring an inner optimization loop.
+
+\paragraph{Step-map parameterization.}
+We adopt an explicit time-stepping form
+\begin{equation}
+\label{eq:explicit-param}
+u_{k+1}^{\mathrm{pred}}
+=
+\Phi_\theta(u_k^{\mathrm{data}}, c_k; \tau)
+=
+u_k^{\mathrm{data}}
++
+\tau\, F_\theta(u_k^{\mathrm{data}}, c_k),
+\end{equation}
+where $F_\theta$ is a neural operator approximating the time derivative,
+and $c_k \triangleq c(t_k,\cdot)$ denotes the (possibly time-dependent) PDE descriptor.
+
+\paragraph{Energy head and metric gradient.}
+We parameterize an energy functional $\mathcal E_\psi(u;c)$.
+Let $\Grad_{\mathsf G}\mathcal E_\psi(u;c)$ denote the gradient
+under the chosen geometry $\mathsf G$.
+In discretized form,
+\begin{equation}
+\label{eq:metric-grad-disc}
+\Grad_{\mathsf G}\mathcal E_\psi(u;c)
+\;\approx\;
+\mathcal K_{\mathsf G}\big(\nabla_u \mathcal E_\psi(u;c)\big),
+\end{equation}
+where $\nabla_u$ is computed by automatic differentiation
+and $\mathcal K_{\mathsf G}$ is the metric operator
+(e.g., identity for $L^2$, discrete Laplacian for $H^{-1}$, etc.).
+
+\paragraph{Gradient-flow alignment regularization.}
+To bias the learned vector field toward a gradient flow,
+we penalize deviations from
+\[
+F_\theta(u,c)
+\;\approx\;
+-\,\Grad_{\mathsf G}\mathcal E_\psi(u;c).
+\]
+This yields the alignment loss
+\begin{equation}
+\label{eq:loss-align}
+\mathcal L_{\mathrm{align}}(\theta,\psi)
+=
+\sum_{(c,i)}\sum_{k=0}^{K-1}
+\left\|
+F_\theta(u_k^{\mathrm{data},(i)}, c_k^{(i)})
++
+\Grad_{\mathsf G}\mathcal E_\psi
+\big(u_k^{\mathrm{data},(i)}; c_k^{(i)}\big)
+\right\|^2.
+\end{equation}
+
+\paragraph{Energy dissipation constraint.}
+In addition, we enforce monotonic energy decay along the predicted step:
+\begin{equation}
+\label{eq:loss-mono-strong}
+\mathcal L_{\mathrm{mono}}(\theta,\psi)
+=
+\sum_{(c,i)}\sum_{k=0}^{K-1}
+\Big(
+\mathcal E_\psi(u_{k+1}^{\mathrm{pred},(i)}; c_k^{(i)})
+-
+\mathcal E_\psi(u_k^{\mathrm{data},(i)}; c_k^{(i)})
+\Big)_+.
+\end{equation}
+
+\paragraph{Data-matching term.}
+We retain the supervised one-step loss
+\begin{equation}
+\label{eq:loss-step-strong}
+\mathcal L_{\mathrm{step}}(\theta)
+=
+\sum_{(c,i)}\sum_{k=0}^{K-1}
+\big\|
+u_{k+1}^{\mathrm{data},(i)}
+-
+u_{k+1}^{\mathrm{pred},(i)}
+\big\|^2.
+\end{equation}
+
+\paragraph{Total objective.}
+The final training objective is
+\begin{equation}
+\label{eq:loss-total-strong}
+\mathcal L(\theta,\psi)
+=
+\mathcal L_{\mathrm{step}}(\theta)
++
+\lambda_{\mathrm{align}}\,\mathcal L_{\mathrm{align}}(\theta,\psi)
++
+\lambda_{\mathrm{mono}}\,\mathcal L_{\mathrm{mono}}(\theta,\psi),
+\end{equation}
+where $\lambda_{\mathrm{align}},\lambda_{\mathrm{mono}}\ge 0$
+control the strength of the gradient-flow regularization.
+
+\paragraph{Interpretation.}
+The neural operator $F_\theta$ is the primary engine generating predictions,
+while $\mathcal E_\psi$ acts as a learned Lyapunov critic.
+The alignment term~\eqref{eq:loss-align} encourages the learned vector field
+to approximate a metric gradient of the energy,
+and the monotonicity penalty~\eqref{eq:loss-mono-strong}
+promotes dissipative stability.
+Importantly, this framework avoids solving a proximal optimization problem
+at each time step, preserving computational efficiency
+while injecting variational structure into the learned dynamics.
+
+\subsection{Latent Gradient-Flow Dynamics}
+To mitigate the computational cost of operating in the high-dimensional physical state space, we introduce a latent gradient-flow model. We define an encoder operator $E_\omega : X \to Z$ that maps the physical state $u \in X$ to a lower-dimensional latent representation $z \in Z$, and a decoder operator $D_\xi : Z \to X$ that reconstructs the physical state. 
+
+Let the encoded ground-truth latent state at time $t_k$ be denoted as $z_k^\text{data} = E_\omega(u_k^\text{data})$. We model the forward temporal evolution in the latent space via a learned one-step transition map $\Phi_\theta$:
+$$ z_{k+1}^\text{pred} = \Phi_\theta(z_k^\text{data}, c; \tau). $$
+
+The predicted physical state at the next time step is subsequently recovered via the decoder, $u_{k+1}^\text{pred} = D_\xi(z_{k+1}^\text{pred})$. 
+
+To endow the latent dynamics with a dissipative gradient-flow structure, we parameterize a latent energy functional $\mathcal{E}_\psi(z; c)$ operating directly on $Z$. The network parameters $(\omega, \xi, \theta, \psi)$ are optimized jointly using a loss function comprising four distinct terms:
+
+\paragraph{1. Reconstruction Loss.}
+To ensure the latent space $Z$ meaningfully captures the physical state manifold without information collapse, we apply a standard autoencoder reconstruction penalty on the ground-truth trajectory:
+$$ \mathcal{L}_\text{recon}(\omega, \xi) = \sum_{(c,i)} \sum_{k=0}^{K} \| u_k^{\text{data},i} - D_\xi(E_\omega(u_k^{\text{data},i})) \|_X^2. $$
+
+\paragraph{2. Step Supervision Loss.}
+We train the latent transition map $\Phi_\theta$ to accurately predict the forward evolution. This is enforced by penalizing the discrepancy between the decoded prediction and the ground-truth state at the next time step:
+$$ \mathcal{L}_{step}(\theta, \omega, \xi) = \sum_{(c,i)} \sum_{k=0}^{K-1} \| u_{k+1}^{\text{data},i} - D_\xi(z_{k+1}^{\text{pred},i}) \|_X^2. $$
+\textit{Remark:} Alternatively, this supervision can be applied strictly in the latent space as $$\| E_\omega(u_{k+1}^{\text{data},i}) - z_{k+1}^{\text{pred},i} \|_Z^2.$$
+
+\paragraph{3. Energy Monotonicity.}
+For the latent transition to represent a dissipative system, the learned latent energy $\mathcal{E}_\psi$ must be non-increasing along the predicted trajectory. We impose a soft hinge-loss penalty on energy increases:
+$$ \mathcal{L}_{mono}(\theta, \psi, \omega) = \sum_{(c,i)} \sum_{k=0}^{K-1} \left[ \mathcal{E}_\psi(z_{k+1}^{\text{pred},i}; c^i) - \mathcal{E}_\psi(z_k^{\text{data},i}; c^i) \right]_+, $$
+where $[x]_+ := \max\{x, 0\}$.
+
+\paragraph{4. Discrete Energy Dissipation Inequality (EDI).}
+To strictly couple the latent dynamics to the geometry of a gradient flow, we enforce the discrete dissipation inequality in the latent space. Let $d_Z(\cdot, \cdot)$ denote the distance metric induced on $Z$. We penalize violations of the proximal update structure:
+$$ \mathcal{L}_{EDI}(\theta, \psi, \omega) = \sum_{(c,i)} \sum_{k=0}^{K-1} \left[\mathcal{E}_\psi(z_{k+1}^{\text{pred},i}; c^i) + \frac{1}{2\tau} d_Z^2(z_{k+1}^{\text{pred},i}, z_k^{\text{data},i}) - \mathcal{E}_\psi(z_k^{\text{data},i}; c^i) \right]_+. $$
+
+\paragraph{5. Spectral loss.} To better control the growth of small-scale errors during autoregressive rollout, we augment the training objective with a weighted spectral loss that penalizes discrepancies in higher Fourier modes more strongly. Let $\omega_{\mathrm{pred}}$ and $\omega_{\mathrm{ref}}$ denote the predicted and reference vorticity fields, and let $\widehat{\omega}_{\mathrm{pred}}(k)$ and $\widehat{\omega}_{\mathrm{ref}}(k)$ be their Fourier coefficients at wave number $k \in \mathbb{Z}^2$. We define the spectral regularization term as
+\begin{equation}
+\mathcal{L}_{\mathrm{spec}}^{(s)}
+=
+\sum_{k \in \mathcal{K}}
+(1+|k|^2)^s
+\left|
+\widehat{\omega}_{\mathrm{pred}}(k)-\widehat{\omega}_{\mathrm{ref}}(k)
+\right|^2,
+\label{eq:spectral_loss}
+\end{equation}
+where $s \ge 0$ controls the strength of the high-frequency weighting and $\mathcal{K}$ denotes the set of retained Fourier modes. This loss is equivalent to a discrete Sobolev-type error and can be viewed as an $H^s$-norm penalty on the prediction error. In contrast to a standard $L^2$ loss, which treats all modes equally, the weighted factor $(1+|k|^2)^s$ emphasizes the accurate reconstruction of higher-frequency components, which are closely related to derivative-sensitive quantities such as palinstrophy and Laplacian norm. Since our diagnostics indicate that OOD failure is primarily associated with excessive growth in small-scale roughness rather than bulk amplitude alone, this spectral loss provides a natural mechanism for discouraging spurious transfer of energy into high modes during training.
+
+\paragraph{Total Objective.}
+The coupled training objective is the weighted sum of these four components:
+$$ \mathcal{L}_{total} = \mathcal{L}_{step} + \lambda_{recon} \mathcal{L}_{recon} + \lambda_{mono} \mathcal{L}_{mono} + \lambda_{EDI} \mathcal{L}_{EDI}, $$
+where $\lambda_{recon}, \lambda_{mono}, \lambda_{EDI} \ge 0$ balance the data fidelity and the variational structure of the latent gradient flow.
+
+\subsection{Latent Gradient Flow Model and Mobility Operator Design}
+\paragraph{Motivation.}
+While many dissipative PDEs admit a gradient-flow formulation in the physical state space, complex systems such as Navier--Stokes generally contain both dissipative and non-conservative components.
+Instead of enforcing a gradient-flow structure directly on the physical state, we propose to \emph{lift the dynamics to a latent space} in which the evolution is approximated by a gradient flow.
+This provides a structured yet flexible model that can capture dissipative behavior while simplifying the dynamics.
+
+\paragraph{Latent representation.}
+Let $u_k \in \mathbb{R}^{n_x \times n_y}$ denote the physical state at time $t_k$.
+We introduce an encoder--decoder pair
+\[
+z_k = \mathrm{Enc}_\alpha(u_k),
+\qquad
+u_k \approx \mathrm{Dec}_\beta(z_k),
+\]
+where $z_k \in \mathbb{R}^{C \times n_x \times n_y}$ is a latent field.
+The encoder and decoder are shared across all PDE instances.
+
+\paragraph{Energy functional in latent space.}
+We define a parameterized energy functional
+\[
+\mathcal E_\psi(z;c): \mathbb{R}^{C \times n_x \times n_y} \to \mathbb{R},
+\]
+where $c$ encodes the PDE instance (e.g., forcing or coefficients).
+The energy is implemented as a neural network with a scalar output, and its gradient with respect to $z$ is computed via automatic differentiation.
+
+\paragraph{Latent gradient-flow dynamics.}
+In the latent space, we introduce a learned energy functional $\mathcal E_\psi(z;c)$, where $c$ denotes problem-dependent conditioning variables (e.g., coefficients of the PDE, forcing terms, or boundary conditions). 
+The evolution of the system is then modeled as a gradient flow:
+\begin{equation}
+\partial_t z
+=
+-\,\mathcal K_\theta(z,c)\,\nabla_z \mathcal E_\psi(z;c),
+\label{eq:latent_gradient_flow}
+\end{equation}
+followed by reconstruction through a decoder
+\begin{equation}
+u \approx \mathrm{Dec}_\beta(z).
+\end{equation}
+An explicit discretization of a gradient flow is
+\begin{equation}
+\label{eq:latent_gf_diag}
+z_{k+1}^{\mathrm{pred}}
+=
+z_k^{\mathrm{data}}
+-
+\tau \,\mathcal K_\theta(z_k^{\mathrm{data}},c)
+\nabla_z \mathcal E_\psi(z_k^{\mathrm{data}};c),
+\end{equation}
+where $\tau>0$ is the time step. In this formulation, the learned components play distinct roles:
+\begin{itemize}[itemsep=-2pt, topsep=2pt]
+\item $\mathcal E_\psi$ captures the \emph{driving potential} or Lyapunov functional of the system;
+\item $\mathcal K_\theta$ defines the \emph{geometry} of the latent space, acting as a mobility operator or preconditioner;
+\item the encoder/decoder pair provides a flexible representation of the state space.
+\end{itemize}
+
+\paragraph{Training objective.}
+Given trajectory data $\{u_k^{\mathrm{data}}\}$, we train the model using the one-step prediction loss
+\begin{equation}
+\label{eq:latent_gf_loss}
+\mathcal L_{\mathrm{step}}
+=
+\sum_k
+\left\|
+u_{k+1}^{\mathrm{pred}}
+-
+u_{k+1}^{\mathrm{data}}
+\right\|^2,
+\end{equation}
+together with a reconstruction loss
+\[
+\mathcal L_{\mathrm{rec}}
+=
+\sum_k
+\left\|
+\mathrm{Dec}_\beta(\mathrm{Enc}_\alpha(u_k^{\mathrm{data}}))
+-
+u_k^{\mathrm{data}}
+\right\|^2.
+\]
+Optionally, we include a soft energy monotonicity constraint
+\[
+\mathcal L_{\mathrm{mono}}
+=
+\sum_k
+\Bigl(
+\mathcal E_\psi(z_{k+1}^{\mathrm{pred}};c)
+-
+\mathcal E_\psi(z_k^{\mathrm{data}};c)
+\Bigr)_+,
+\]
+to further encourage dissipative behavior.
+
+\paragraph{Design principles for $\mathcal K_\theta$.}
+A key challenge is to design $\mathcal K_\theta$ so that it meaningfully represents geometry rather than arbitrary dynamics. 
+To preserve the gradient-flow structure, we impose the following principles:
+\begin{itemize}
+\item[(i)] \textbf{Positivity:} For all $g$,
+\[
+\langle g, \mathcal K_\theta(z,c)\, g \rangle \ge 0,
+\]
+ensuring that the energy is non-increasing along trajectories.
+
+\item[(ii)] \textbf{(Approximate) self-adjointness:} $\mathcal K_\theta$ should act as a symmetric operator, so that it can be interpreted as defining a latent metric.
+
+\item[(iii)] \textbf{Controlled expressivity:} $\mathcal K_\theta$ should primarily reshape the descent direction $\nabla_z \mathcal E_\psi$, rather than encode an independent vector field.
+\end{itemize}
+
+Under these conditions, the energy dissipation property holds:
+\begin{equation}
+\frac{d}{dt}\mathcal E_\psi(z(t);c)
+=
+- \big\langle \nabla_z \mathcal E_\psi(z;c),\, \mathcal K_\theta(z,c)\,\nabla_z \mathcal E_\psi(z;c)\big\rangle \le 0.
+\end{equation}
+
+\paragraph{Diagonal mobility (baseline).}
+As a simple and stable baseline, we consider a diagonal (pointwise) mobility operator:
+\begin{equation}
+(\mathcal K_\theta g)(\xi)
+=
+m_\theta(\xi;z,c)\, g(\xi),
+\qquad m_\theta(\xi;z,c)\ge 0,
+\label{eq:diag_mobility_full}
+\end{equation}
+where $z(\xi)$ denotes the latent field at location $\xi$. 
+This corresponds to a state-dependent preconditioning of the gradient and is analogous to scalar mobility functions in classical PDE gradient flows. 
+While local, this model already captures anisotropic scaling and provides a robust starting point.
+
+\paragraph{Nonlocal operator formulation.}
+To model long-range interactions and spatial coupling in the latent space, we extend $\mathcal K_\theta$ to a nonlocal operator:
+\begin{equation}
+(\mathcal K_\theta g)(\xi)
+=
+\int_{\Omega_{\mathrm{lat}}}
+\kappa_\theta(\xi,\eta;z,c)\, g(\eta)\, d\eta,
+\label{eq:integral_operator_full}
+\end{equation}
+where $\kappa_\theta$ is a learned kernel. 
+However, directly parameterizing $\kappa_\theta$ does not guarantee positivity or symmetry and can lead to unstable dynamics.
+
+\paragraph{PSD factorization via neural operators.}
+To ensure structural consistency, we parameterize $\mathcal K_\theta$ as a positive semidefinite operator:
+\begin{equation}
+\mathcal K_\theta(z,c)
+=
+\varepsilon I + \mathcal S_\theta(z,c)^\ast \mathcal S_\theta(z,c),
+\qquad \varepsilon > 0,
+\label{eq:K_factorization_full}
+\end{equation}
+where $\mathcal S_\theta$ is a learnable operator and $\mathcal S_\theta^\ast$ denotes its adjoint. 
+This guarantees that for all $g$,
+\begin{equation}
+\langle g, \mathcal K_\theta g\rangle
+=
+\|\mathcal S_\theta g\|^2 + \varepsilon \|g\|^2
+\ge \varepsilon \|g\|^2,
+\end{equation}
+so that $\mathcal K_\theta$ is positive definite and the latent dynamics remain dissipative. In this formulation, $\mathcal K_\theta$ acts as a learned metric tensor, while $\mathcal S_\theta$ controls nonlocal mixing and anisotropy. In implementation, we often fix $\epsilon$ be be a small number like $10^{-3},10^{-4}$.
+
+\paragraph{Parameterization of $\mathcal K_\theta$.}
+The operator $\mathcal K_\theta$ can be implemented using standard neural operator architectures:
+\begin{itemize}[itemsep=-2pt,topsep=2pt]
+\item \textbf{PSD Fourier parameterization.}
+When the latent state is represented on a regular grid, we may parameterize the mobility operator $\mathcal K_\theta$ in the Fourier domain. For an input field $v$, we write
+\[
+\widehat{(\mathcal K_\theta v)}_k = R_k(z,c)\,\hat v_k,
+\]
+where $\hat v_k$ denotes the Fourier coefficient at mode $k$, and $R_k(z,c)$ is a matrix-valued Fourier symbol acting across latent channels. By Parseval's identity,
+\[
+\langle v,\mathcal K_\theta v\rangle
+=
+\sum_k \hat v_k^H R_k(z,c)\hat v_k.
+\]
+Therefore, $\mathcal K_\theta$ is positive semidefinite whenever $R_k(z,c)\succeq 0$ for every mode $k$.
+
+To enforce this structure, we parameterize
+\[
+R_k(z,c)=W_k(z,c)W_k(z,c)^H+\varepsilon I,
+\qquad \varepsilon>0,
+\]
+where $W_k(z,c)^H$ denotes the conjugate transpose. Then
+\[
+\hat v_k^H R_k(z,c)\hat v_k
+=
+\|W_k(z,c)^H\hat v_k\|^2+\varepsilon\|\hat v_k\|^2 \ge \varepsilon\|\hat v_k\|^2,
+\]
+which guarantees strict positivity of the mobility operator. In addition, for real-valued latent fields, the symbols are constrained to satisfy the appropriate conjugate symmetry across Fourier modes so that $\mathcal K_\theta v$ remains real-valued after the inverse transform.
+
+\item \textbf{Transformer-based operator:} For more flexible or irregular geometries, a lightweight attention-based operator can model long-range interactions between latent tokens.
+\end{itemize}
+
+Importantly, $\mathcal K_\theta$ acts on the gradient field $g=\nabla_z \mathcal E_\psi(z;c)$, rather than directly predicting $\partial_t z$. 
+This preserves the interpretation of the dynamics as a gradient flow.
+
+
+\paragraph{Summary.}
+The proposed latent gradient-flow model combines a learned energy functional with a structured mobility operator. 
+The diagonal model provides a simple baseline, while the factorized construction \eqref{eq:K_factorization_full} enables expressive nonlocal interactions with guaranteed stability. 
+This design allows the model to capture complex PDE dynamics while preserving a principled variational structure.
+
+\subsubsection{Nonlocal Energy Functional via Attention Mechanisms}
+
+The local density-based energy model introduced above imposes a strong inductive bias by restricting the energy functional to an integral of pointwise features. While this is natural for classical variational PDE formulations, it can be overly restrictive in latent space, where global interactions and long-range dependencies may play a crucial role.
+
+To address this limitation, we introduce a fully nonlocal parameterization of the latent energy functional using attention mechanisms. The key idea is to represent the energy as a global functional of the latent field, allowing each spatial location to interact with all others through self-attention, and to incorporate problem-specific conditioning through cross-attention.
+
+\paragraph{Tokenization and embedding.}
+Let $z \in \mathbb{R}^{C_z \times n_x \times n_y}$ denote the latent state, and let $c$ denote the conditioning input (e.g., forcing, coefficients, or parameters), represented either as a spatial field or a set of global variables. We flatten the spatial grid into a sequence of $N = n_x n_y$ tokens:
+\[
+Z = \{z_i\}_{i=1}^N, \qquad C = \{c_i\}_{i=1}^N,
+\]
+and map them into an embedding space:
+\[
+H^{(0)} = \phi_z(Z), \qquad G^{(0)} = \phi_c(C),
+\]
+where $\phi_z$ and $\phi_c$ are learnable linear projections. Rather than adding absolute positional embeddings, we encode spatial structure through two-dimensional rotary positional embeddings (2D RoPE), which are applied directly within the attention mechanism. This allows the model to represent relative spatial relationships in both coordinate directions while preserving translation-friendly inductive bias.
+
+\paragraph{Self-attention over latent tokens.}
+We first apply a stack of self-attention layers to the latent tokens:
+\[
+H^{(\ell+\frac12)} = \mathrm{SelfAttn}_\ell\big(H^{(\ell)}\big), \qquad \ell = 0,\dots,L-1,
+\]
+where each attention layer uses 2D RoPE to rotate queries and keys according to the spatial coordinates of the corresponding tokens. This enables each token to aggregate information from the entire latent field and capture nonlocal interactions and global structure in the solution.
+
+\paragraph{Cross-attention with conditioning variables.}
+To incorporate dependence on PDE coefficients or forcing, we apply cross-attention using latent tokens as queries and conditioning tokens as keys and values:
+\[
+H^{(\ell+1)} = \mathrm{CrossAttn}_\ell\big(Q=H^{(\ell+\frac12)},\, K=G^{(0)},\, V=G^{(0)}\big).
+\]
+Here again, 2D RoPE is used to encode the spatial arrangement of latent and conditioning tokens, so that the energy depends on relative geometric relationships between the latent solution field and the coefficient field. This yields a coefficient-dependent energy functional $\mathcal E_\psi(z,c)$.
+
+\paragraph{Energy aggregation.}
+After $L$ layers, we obtain contextualized tokens $H^{(L)} = \{H_i\}_{i=1}^N$. The scalar energy is computed via global pooling followed by a multilayer perceptron:
+\[
+\bar{H} = \frac{1}{N} \sum_{i=1}^N H_i,
+\qquad
+\mathcal E_\psi(z,c) = \mathrm{MLP}(\bar{H}).
+\]
+This construction yields a permutation-consistent global summary while retaining spatial information through the attention layers themselves.
+
+\paragraph{Discussion.}
+This attention-based parameterization defines a fully nonlocal energy functional in latent space. In contrast to local density models, the energy at each location is informed by global interactions across the entire field, making it well-suited for capturing long-range dependencies in complex PDE systems such as Navier--Stokes.
+
+Moreover, using 2D RoPE gives the architecture an inductive bias toward relative spatial structure rather than absolute indexing, which is more appropriate for field data on regular grids. The use of cross-attention further ensures that the energy adapts to problem-specific inputs, enabling a unified treatment of parameterized PDE families. While this formulation sacrifices the classical interpretation of energy as an integral of local densities, it provides a flexible and expressive representation that better matches the structure of learned latent dynamics.
+
+%%%%%%%%%%%%-- reference --%%%%%%%%%%%
+\newpage
+\bibliographystyle{ims}
+\bibliography{reference}
+
+%%%%%%%%%%%% -- appendix -- %%%%%%%%%%%
+
+\end{document}

@@ -1,6 +1,6 @@
 """grad_flow_l2 package exports."""
 
-from .data import (
+from .heat_data import (
     DATASET_VERSION,
     HeatTrajectoryDataset,
     HeatTrajectoryTensorDataset,
@@ -19,7 +19,7 @@ from .data import (
     validate_split_dirichlet_u0,
 )
 from .generator import EnergyHead1D, GradientFlowModel, ProximalMap1D
-from .trainer import GradientFlowTrainer
+from .trainer_heat import GradientFlowTrainer
 from .utils import (
     build_laplacian_1d_dirichlet,
     check_dirichlet_1d,
