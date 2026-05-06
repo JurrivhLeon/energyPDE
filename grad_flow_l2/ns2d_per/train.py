@@ -89,7 +89,15 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--eval-interval", type=int, default=1)
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=25,
+        help="Save best_model_through_epoch_XXXX.pt every N epochs. Use <=0 to disable periodic snapshots.",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr-step-size", type=int, default=100, help="Halve/decay LR every N epochs.")
+    parser.add_argument("--lr-gamma", type=float, default=0.5, help="Multiplicative LR decay for StepLR.")
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-recon", type=float, default=1.0)
@@ -278,6 +286,8 @@ def main(args: argparse.Namespace) -> None:
         lambda_spec=args.lambda_spec,
         spectral_s=args.spectral_s,
         lr=args.lr,
+        lr_step_size=args.lr_step_size,
+        lr_gamma=args.lr_gamma,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
         max_epochs=args.epochs,
@@ -295,6 +305,7 @@ def main(args: argparse.Namespace) -> None:
 
     print(
         f"Training config: epochs={args.epochs}, lr={args.lr}, "
+        f"lr_step_size={args.lr_step_size}, lr_gamma={args.lr_gamma}, "
         f"lambda_recon={args.lambda_recon}, lambda_mono={args.lambda_mono}, "
         f"lambda_prox={args.lambda_prox}, lambda_spec={args.lambda_spec}, spectral_s={args.spectral_s}, "
         f"prox_type={args.prox_simulator_type}, "
@@ -308,6 +319,7 @@ def main(args: argparse.Namespace) -> None:
         val_traj_loader=val_traj_loader,
         epochs=args.epochs,
         eval_interval=args.eval_interval,
+        checkpoint_interval=args.checkpoint_interval,
     )
     print("Training complete.")
     print("Last train metrics:", history["train"][-1])

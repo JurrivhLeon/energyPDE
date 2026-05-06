@@ -129,6 +129,8 @@ class HiddenGradientFlowTrainer2D:
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         grad_clip: float = 1.0,
+        lr_step_size: int = 100,
+        lr_gamma: float = 0.5,
         max_epochs: int = 200,
         device: str = "cpu",
         output_dir: Optional[str] = None,
@@ -150,7 +152,11 @@ class HiddenGradientFlowTrainer2D:
         self.show_epoch_pbar = bool(show_epoch_pbar)
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=max_epochs)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer,
+            step_size=max(1, int(lr_step_size)),
+            gamma=float(lr_gamma),
+        )
 
     def _compute_losses(self, u_k: torch.Tensor, u_k1_data: torch.Tensor, f: torch.Tensor) -> Dict[str, torch.Tensor]:
         pred = self.model.predict_step(u_k, f, dt=self.dt, return_latent=True)
@@ -317,9 +323,12 @@ class HiddenGradientFlowTrainer2D:
         val_traj_loader: Optional[DataLoader] = None,
         epochs: int = 200,
         eval_interval: int = 1,
+        checkpoint_interval: int = 25,
     ) -> Dict[str, list]:
         history = {"train": [], "val": []}
         best_metric = float("inf")
+        best_epoch = 0
+        best_metrics: Optional[Dict[str, float]] = None
 
         for epoch in range(1, epochs + 1):
             train_metrics = self.train_epoch(train_step_loader, epoch=epoch)
@@ -331,6 +340,8 @@ class HiddenGradientFlowTrainer2D:
                 monitor = val_metrics.get("val_rollout_rel_l2", val_metrics["val_loss_step"])
                 if monitor < best_metric:
                     best_metric = monitor
+                    best_epoch = epoch
+                    best_metrics = val_metrics
                     self._save_checkpoint("best_model.pt", epoch, val_metrics)
 
                 print(
@@ -359,6 +370,11 @@ class HiddenGradientFlowTrainer2D:
                     f"train_mono={train_metrics['loss_mono']:.6f} "
                     f"train_prox={train_metrics['loss_prox']:.6f}"
                 )
+
+            if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
+                snapshot_metrics = best_metrics if best_metrics is not None else train_metrics
+                snapshot_epoch = best_epoch if best_metrics is not None else epoch
+                self._save_checkpoint(f"best_model_through_epoch_{epoch:04d}.pt", snapshot_epoch, snapshot_metrics)
 
             self.scheduler.step()
 
