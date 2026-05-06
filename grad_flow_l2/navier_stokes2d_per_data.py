@@ -436,6 +436,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
     chunk_size: int = 256,
     show_progress: bool = False,
     dtype: torch.dtype = torch.float32,
+    device: str = "cpu",
 ) -> Dict[str, Dict[str, torch.Tensor]]:
     if nu <= 0:
         raise ValueError("nu must be > 0")
@@ -471,6 +472,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
     h_x = 1.0 / float(n_x)
     h_y = 1.0 / float(n_y)
     area = h_x * h_y
+    device = str(device)
 
     u0_hr = sample_periodic_gaussian_field_2d(
         n_x=solver_n_x,
@@ -480,7 +482,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
         spectrum_shift=u0_spectrum_shift,
         spectrum_power=u0_spectrum_power,
         zero_mean=True,
-        device="cpu",
+        device=device,
         dtype=torch.float64,
     )
     u0_hr = float(u0_rescale) * u0_hr
@@ -507,7 +509,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             allow_sinusoidal=f_allow_sinusoidal,
             show_progress=show_progress,
             progress_desc="sample forcing",
-            device="cpu",
+            device=device,
         ).to(dtype=torch.float64)
         f = spectral_truncate_periodic_field_2d(f_hr, target_n_x=n_x, target_n_y=n_y).to(dtype=dtype)
         f = project_zero_mean_2d(f)
@@ -541,7 +543,11 @@ def generate_navier_stokes2d_periodic_dataset_splits(
         u_traj_chunks.append(u_traj_chunk)
     u_traj = torch.cat(u_traj_chunks, dim=0)
 
-    all_data = {"f": f, "u0": u0, "u_traj": u_traj}
+    all_data = {
+        "f": f.cpu(),
+        "u0": u0.cpu(),
+        "u_traj": u_traj.cpu(),
+    }
     train_end = int(n_train)
     val_end = int(n_train + n_val)
 
@@ -591,6 +597,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             "target_f_norm_range": [float(target_f_norm_range[0]), float(target_f_norm_range[1])],
             "cfl_adv": float(cfl_adv),
             "chunk_size": int(chunk_size),
+            "device": device,
         },
     }
 
@@ -603,17 +610,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate cached periodic 2D Navier-Stokes dataset splits")
     parser.add_argument("--n-x", type=int, default=64, help="Number of output grid points in x")
     parser.add_argument("--n-y", type=int, default=64, help="Number of output grid points in y")
-    parser.add_argument("--solver-n-x", type=int, default=64, help="Number of solver grid points in x")
-    parser.add_argument("--solver-n-y", type=int, default=64, help="Number of solver grid points in y")
+    parser.add_argument("--solver-n-x", type=int, default=256, help="Number of solver grid points in x")
+    parser.add_argument("--solver-n-y", type=int, default=256, help="Number of solver grid points in y")
     parser.add_argument("--n-steps", type=int, default=10, help="Number of recorded macro steps on [0,t_final]")
     parser.add_argument("--t-final", type=float, default=10.0, help="Final time horizon")
     parser.add_argument("--nu", type=float, default=0.001, help="Viscosity coefficient")
-    parser.add_argument("--solver-dt", type=float, default=1e-3, help="Time step used by the pseudospectral solver")
+    parser.add_argument("--solver-dt", type=float, default=1e-4, help="Time step used by the pseudospectral solver")
     parser.add_argument("--record-dt", type=float, default=1.0, help="Snapshot spacing used during data generation")
 
-    parser.add_argument("--n-train", type=int, default=3000)
-    parser.add_argument("--n-val", type=int, default=500)
-    parser.add_argument("--n-test", type=int, default=500)
+    parser.add_argument("--n-train", type=int, default=1500)
+    parser.add_argument("--n-val", type=int, default=300)
+    parser.add_argument("--n-test", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--u0-spectrum-scale", type=float, default=8.0 ** 1.5)
@@ -639,6 +646,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-f-norm-max", type=float, default=0.5)
     parser.add_argument("--cfl-adv", type=float, default=0.45)
     parser.add_argument("--chunk-size", type=int, default=256, help="Trajectory solver chunk size")
+    parser.add_argument("--device", type=str, default="cpu", help="Torch device for sampling and solves, e.g. cpu or cuda:0")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
 
     parser.add_argument(
@@ -834,6 +842,7 @@ def main(args: argparse.Namespace) -> None:
         chunk_size=args.chunk_size,
         show_progress=(not args.no_progress),
         dtype=torch.float32,
+        device=args.device,
     )
 
     out_dir = os.path.dirname(args.dataset_path)
