@@ -136,6 +136,57 @@ def sample_periodic_field_mixed_1d(
     return torch.cat(out, dim=0)
 
 
+def sample_elastic_forcing_1d(
+    n_points: int,
+    n_samples: int = 1,
+    stiffness: float = 1.0,
+    length_scale_range: tuple[float, float] = (0.06, 0.35),
+    max_modes: int = 6,
+    grf_prob: float = 0.7,
+    zero_mean: bool = True,
+    boundary_condition: str = "periodic",
+    taper_power: float = 1.0,
+    device: str = "cpu",
+) -> torch.Tensor:
+    """
+    Sample static elastic forcing fields as Hookean restoring profiles.
+
+    The sampled smooth displacement profile q(x) is converted to a static
+    additive force f(x) = -k q(x). This keeps the existing Burgers dataset
+    schema while giving the forcing a simple elastic interpretation.
+    """
+    if stiffness <= 0:
+        raise ValueError("stiffness must be > 0")
+    bc = boundary_condition.strip().lower()
+    if bc == "periodic":
+        displacement = sample_periodic_field_mixed_1d(
+            n_points=n_points,
+            n_samples=n_samples,
+            amplitude=1.0,
+            length_scale_range=length_scale_range,
+            max_modes=max_modes,
+            grf_prob=grf_prob,
+            zero_mean=zero_mean,
+            device=device,
+        )
+        return -float(stiffness) * displacement
+    if bc == "dirichlet":
+        interior = sample_field_mixed(
+            n_points=n_points - 2,
+            n_samples=n_samples,
+            amplitude=1.0,
+            length_scale_range=length_scale_range,
+            max_modes=max_modes,
+            grf_prob=grf_prob,
+            device=device,
+        )
+        taper = _dirichlet_taper(n_x=n_points - 2, power=taper_power, device=device)
+        interior = -float(stiffness) * interior * taper.unsqueeze(0)
+        zeros = torch.zeros(n_samples, 1, device=device)
+        return torch.cat([zeros, interior, zeros], dim=-1)
+    raise ValueError("boundary_condition must be one of {'periodic','dirichlet'}")
+
+
 def sample_burgers_paper_u0_1d(
     n_points: int,
     n_samples: int = 1,
@@ -527,6 +578,7 @@ def generate_burgers_dataset_splits(
     u0_mass: float = 25.0,
     forcing_mode: str = "zero",
     forcing_sampler: str = "grf",
+    elastic_stiffness: float = 1.0,
     f_amplitude: float = 1.5,
     f_grf_prob: float = 0.7,
     f_length_scale_min: float = 0.06,
@@ -544,6 +596,7 @@ def generate_burgers_dataset_splits(
     solver_dt: float | None = None,
     dataset_dt: float | None = None,
     solve_batch_size: int = 64,
+    device: str = "cpu",
     dtype: torch.dtype = torch.float32,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
     rng_state_torch = torch.random.get_rng_state()
@@ -567,6 +620,9 @@ def generate_burgers_dataset_splits(
         dataset_dt = float(t_final) / float(n_steps)
     if solver_dt is None:
         solver_dt = dataset_dt
+    solve_device = torch.device(device)
+    if solve_device.type == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA device requested but torch.cuda.is_available() is False")
     expected_steps = int(round(float(t_final) / float(dataset_dt)))
     if expected_steps != int(n_steps) or abs(float(t_final) / float(dataset_dt) - expected_steps) > 1e-10:
         raise ValueError("n_steps must equal t_final / dataset_dt")
@@ -581,7 +637,7 @@ def generate_burgers_dataset_splits(
                 covariance_scale=u0_covariance_scale,
                 mass=u0_mass,
                 zero_mean=zero_mean,
-                device="cpu",
+                device=str(solve_device),
             ).to(dtype=dtype)
             if norm_targeting:
                 u0_solver = _rescale_batch_l2(
@@ -597,7 +653,7 @@ def generate_burgers_dataset_splits(
                 max_modes=f_max_modes,
                 amplitude=u0_amplitude,
                 zero_mean=zero_mean,
-                device="cpu",
+                device=str(solve_device),
             ).to(dtype=dtype)
             if norm_targeting:
                 u0_solver = _rescale_batch_l2(
@@ -615,7 +671,7 @@ def generate_burgers_dataset_splits(
                 max_modes=f_max_modes,
                 grf_prob=f_grf_prob,
                 zero_mean=zero_mean,
-                device="cpu",
+                device=str(solve_device),
             ).to(dtype=dtype)
             if norm_targeting:
                 u0_solver = _rescale_batch_l2(
@@ -635,9 +691,9 @@ def generate_burgers_dataset_splits(
             n_points=n_x,
             n_samples=total,
             amplitude=u0_amplitude,
-            device="cpu",
+            device=str(solve_device),
         ).to(dtype=dtype)
-        taper = _dirichlet_taper(n_x=n_x, power=taper_power, device="cpu", dtype=dtype)
+        taper = _dirichlet_taper(n_x=n_x, power=taper_power, device=str(solve_device), dtype=dtype)
         u0 = u0 * taper.unsqueeze(0)
         if norm_targeting:
             u0 = _rescale_batch_l2(
@@ -650,15 +706,28 @@ def generate_burgers_dataset_splits(
 
     if forcing_mode not in ("zero", "mixed"):
         raise ValueError("forcing_mode must be one of {'zero', 'mixed'}")
-    if forcing_sampler not in {"grf", "mixed"}:
-        raise ValueError("forcing_sampler must be one of {'grf','mixed'}")
+    if forcing_sampler not in {"grf", "mixed", "elastic"}:
+        raise ValueError("forcing_sampler must be one of {'grf','mixed','elastic'}")
 
     if forcing_mode == "zero":
         f_width = solver_n_x if bc == "periodic" else n_x + 2
-        f_solver = torch.zeros(total, f_width, dtype=dtype)
+        f_solver = torch.zeros(total, f_width, dtype=dtype, device=solve_device)
     else:
         if bc == "periodic":
-            if forcing_sampler == "grf":
+            if forcing_sampler == "elastic":
+                f_solver = sample_elastic_forcing_1d(
+                    n_points=solver_n_x,
+                    n_samples=total,
+                    stiffness=elastic_stiffness,
+                    length_scale_range=(f_length_scale_min, f_length_scale_max),
+                    max_modes=f_max_modes,
+                    grf_prob=f_grf_prob,
+                    zero_mean=zero_mean,
+                    boundary_condition="periodic",
+                    device=str(solve_device),
+                ).to(dtype=dtype)
+                f_solver = f_amplitude * f_solver / (f_solver.abs().amax(dim=1, keepdim=True) + 1e-8)
+            elif forcing_sampler == "grf":
                 ls = float(0.5 * (f_length_scale_min + f_length_scale_max))
                 f_solver = sample_periodic_grf_1d(
                     n_points=solver_n_x,
@@ -666,7 +735,7 @@ def generate_burgers_dataset_splits(
                     length_scale=ls,
                     variance=1.0,
                     zero_mean=zero_mean,
-                    device="cpu",
+                    device=str(solve_device),
                 ).to(dtype=dtype)
                 f_solver = f_amplitude * f_solver / (f_solver.abs().amax(dim=1, keepdim=True) + 1e-8)
             else:
@@ -678,18 +747,33 @@ def generate_burgers_dataset_splits(
                     max_modes=f_max_modes,
                     grf_prob=f_grf_prob,
                     zero_mean=zero_mean,
-                    device="cpu",
+                    device=str(solve_device),
                 ).to(dtype=dtype)
         else:
-            f_solver = sample_field_mixed(
-                n_points=n_x + 2,
-                n_samples=total,
-                amplitude=f_amplitude,
-                length_scale_range=(f_length_scale_min, f_length_scale_max),
-                max_modes=f_max_modes,
-                grf_prob=f_grf_prob,
-                device="cpu",
-            ).to(dtype=dtype)
+            if forcing_sampler == "elastic":
+                f_solver = sample_elastic_forcing_1d(
+                    n_points=n_x + 2,
+                    n_samples=total,
+                    stiffness=elastic_stiffness,
+                    length_scale_range=(f_length_scale_min, f_length_scale_max),
+                    max_modes=f_max_modes,
+                    grf_prob=f_grf_prob,
+                    zero_mean=zero_mean,
+                    boundary_condition="dirichlet",
+                    taper_power=taper_power,
+                    device=str(solve_device),
+                ).to(dtype=dtype)
+                f_solver = f_amplitude * f_solver / (f_solver.abs().amax(dim=1, keepdim=True) + 1e-8)
+            else:
+                f_solver = sample_field_mixed(
+                    n_points=n_x + 2,
+                    n_samples=total,
+                    amplitude=f_amplitude,
+                    length_scale_range=(f_length_scale_min, f_length_scale_max),
+                    max_modes=f_max_modes,
+                    grf_prob=f_grf_prob,
+                    device=str(solve_device),
+                ).to(dtype=dtype)
         if norm_targeting:
             f_solver = _rescale_forcing_l2(
                 f=f_solver,
@@ -725,7 +809,7 @@ def generate_burgers_dataset_splits(
             boundary_condition=bc,
         ).to(dtype=dtype)
 
-    all_data = {"f": f, "u0": u0, "u_traj": u_traj}
+    all_data = {"f": f.cpu(), "u0": u0.cpu(), "u_traj": u_traj.cpu()}
     train_end = n_train
     val_end = n_train + n_val
 
@@ -745,6 +829,7 @@ def generate_burgers_dataset_splits(
             "dataset_dt": float(dataset_dt),
             "solver_dt": float(solver_dt),
             "solve_batch_size": int(solve_batch_size),
+            "generation_device": str(solve_device),
             "h": float(h),
             "h_solver": float(h_solver),
             "n_train": int(n_train),
@@ -757,6 +842,7 @@ def generate_burgers_dataset_splits(
             "u0_mass": float(u0_mass),
             "forcing_mode": forcing_mode,
             "forcing_sampler": forcing_sampler,
+            "elastic_stiffness": float(elastic_stiffness),
             "f_grid_points": int(f.shape[-1]),
             "f_solver_grid_points": int(f_solver.shape[-1]),
             "u0_grid_points": int(n_x),
@@ -790,6 +876,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--solver-dt", type=float, default=1e-3, help="Fine reference solver time step")
     parser.add_argument("--solver-n-x", type=int, default=8192, help="Fine reference solver spatial resolution")
     parser.add_argument("--solve-batch-size", type=int, default=64, help="Number of samples per high-res solve chunk")
+    parser.add_argument("--device", type=str, default="cpu", help="Device for reference generation, e.g. cpu or cuda:0")
     parser.add_argument("--nu", type=float, default=0.1, help="Viscosity coefficient")
 
     parser.add_argument("--n-train", type=int, default=1500)
@@ -803,7 +890,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--u0-mass", type=float, default=25.0)
     parser.add_argument("--boundary-condition", type=str, default="periodic", choices=["periodic", "dirichlet"])
     parser.add_argument("--forcing-mode", type=str, default="mixed", choices=["zero", "mixed"])
-    parser.add_argument("--forcing-sampler", type=str, default="grf", choices=["grf", "mixed"])
+    parser.add_argument("--forcing-sampler", type=str, default="grf", choices=["grf", "mixed", "elastic"])
+    parser.add_argument("--elastic-stiffness", type=float, default=1.0)
     parser.add_argument("--f-amplitude", type=float, default=0.5)
     parser.add_argument("--f-grf-prob", type=float, default=0.7)
     parser.add_argument("--f-length-scale-min", type=float, default=0.06)
@@ -879,6 +967,7 @@ def main(args: argparse.Namespace) -> None:
         u0_mass=args.u0_mass,
         forcing_mode=args.forcing_mode,
         forcing_sampler=args.forcing_sampler,
+        elastic_stiffness=args.elastic_stiffness,
         f_amplitude=args.f_amplitude,
         f_grf_prob=args.f_grf_prob,
         f_length_scale_min=args.f_length_scale_min,
@@ -896,6 +985,7 @@ def main(args: argparse.Namespace) -> None:
         solver_dt=args.solver_dt,
         dataset_dt=args.dataset_dt,
         solve_batch_size=args.solve_batch_size,
+        device=args.device,
         dtype=torch.float32,
     )
 

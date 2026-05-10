@@ -1,5 +1,5 @@
 """
-Evaluate and visualize deterministic latent FNO Markov baselines on 1D Burgers data.
+Evaluate and visualize deterministic latent FNO Markov baselines on forced damped-driven 1D KdV data.
 """
 
 from __future__ import annotations
@@ -21,17 +21,22 @@ try:
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.utils import compute_relative_l2_error
-    from grad_flow_l2.burgers.train import _build_model
+    from grad_flow_l2.kdv_1d.train import _build_model
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate deterministic latent FNO Markov baseline on 1D Burgers")
-    parser.add_argument("--dataset-path", type=str, required=True, help="Path to cached Burgers dataset (.pt)")
+    parser = argparse.ArgumentParser(description="Evaluate deterministic latent FNO Markov baseline on 1D KdV")
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default="grad_flow_l2/kdv_1d/datasets/kdv_forced_periodic_L32_snx4096_nx512_dt0p1_solverdt0p01_gamma0p1.pt",
+        help="Path to cached KdV dataset (.pt)",
+    )
     parser.add_argument("--checkpoint-path", type=str, required=True, help="Path to trained checkpoint (.pt)")
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--n-plot-samples", type=int, default=8)
     parser.add_argument("--snapshot-times", type=str, default="0.2,0.4,0.6,0.8,1.0,2.0,3.0,4.0,5.0")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/burgers/outputs_sv/eval")
+    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/kdv_1d/outputs_sv/eval")
     parser.add_argument("--cpu", action="store_true")
 
     # Must match training architecture.
@@ -44,7 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-modes", type=int, default=64)
     parser.add_argument("--disable-fno-grid", action="store_true")
     parser.add_argument("--use-dt-channel", action="store_true")
-    parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument(
+        "--disable-forcing-channel",
+        action="store_true",
+        help="Disable the static forcing channel.",
+    )
     parser.add_argument("--disable-u-grad-feature", action="store_true")
     return parser.parse_args()
 
@@ -224,6 +233,7 @@ def _plot_samples(
     dt: float,
     t_final: float,
     h: float,
+    domain_length: float,
     snapshot_times: List[float],
     n_plot_samples: int,
     out_dir: str,
@@ -242,7 +252,7 @@ def _plot_samples(
     sample_ids = torch.linspace(0, total - 1, n_plot).long().tolist()
     n_steps = int(u_traj.shape[1] - 1)
     n_x = int(u_traj.shape[-1])
-    x = np.arange(n_x, dtype=np.float64) / float(n_x)
+    x = np.arange(n_x, dtype=np.float64) * (float(domain_length) / float(n_x))
     t_grid = np.arange(n_steps + 1, dtype=np.float64) * float(dt)
 
     for sample_id in sample_ids:
@@ -260,16 +270,16 @@ def _plot_samples(
 
         fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.0), squeeze=False, constrained_layout=True)
 
-        axes[0, 0].plot(x, f[sample_id].numpy(), color="tab:green", linewidth=1.8)
-        axes[0, 0].set_title("forcing")
+        axes[0, 0].plot(x, u_ref_i[0].numpy(), color="black", linewidth=1.8)
+        axes[0, 0].set_title("initial state")
         axes[0, 0].set_xlabel("x")
-        axes[0, 0].set_ylabel("f")
+        axes[0, 0].set_ylabel("u")
         axes[0, 0].grid(alpha=0.25)
 
-        axes[0, 1].plot(x, u_ref_i[0].numpy(), color="black", linewidth=1.8)
-        axes[0, 1].set_title("initial condition")
-        axes[0, 1].set_xlabel("x")
-        axes[0, 1].set_ylabel("u")
+        axes[0, 1].plot(t_grid, rel_curve_i.numpy(), color="tab:red", linewidth=1.8)
+        axes[0, 1].set_title("relative L2")
+        axes[0, 1].set_xlabel("t")
+        axes[0, 1].set_ylabel("rel L2")
         axes[0, 1].grid(alpha=0.25)
 
         colors = ["black", "tab:blue", "tab:orange", "tab:green", "tab:red", "tab:brown", "tab:pink"]
@@ -297,7 +307,7 @@ def _plot_samples(
             u_ref_i.numpy(),
             aspect="auto",
             origin="lower",
-            extent=[0.0, 1.0, 0.0, t_grid[-1]],
+            extent=[0.0, float(domain_length), 0.0, t_grid[-1]],
             cmap="RdBu_r",
             vmin=-state_scale,
             vmax=state_scale,
@@ -309,7 +319,7 @@ def _plot_samples(
             u_pred_i.numpy(),
             aspect="auto",
             origin="lower",
-            extent=[0.0, 1.0, 0.0, t_grid[-1]],
+            extent=[0.0, float(domain_length), 0.0, t_grid[-1]],
             cmap="RdBu_r",
             vmin=-state_scale,
             vmax=state_scale,
@@ -321,7 +331,7 @@ def _plot_samples(
             err_i.numpy(),
             aspect="auto",
             origin="lower",
-            extent=[0.0, 1.0, 0.0, t_grid[-1]],
+            extent=[0.0, float(domain_length), 0.0, t_grid[-1]],
             cmap="magma",
             vmin=0.0,
             vmax=err_scale,
@@ -334,7 +344,7 @@ def _plot_samples(
         fig.colorbar(im_pred, ax=axes[1, 1], fraction=0.046, pad=0.04, label="u")
         fig.colorbar(im_err, ax=axes[1, 2], fraction=0.046, pad=0.04, label="abs error")
         fig.suptitle(
-            f"Burgers sample {sample_id}: mean rel L2={rel_mean_i:.3e}, final rel L2={rel_final_i:.3e}",
+            f"KdV sample {sample_id}: mean rel L2={rel_mean_i:.3e}, final rel L2={rel_final_i:.3e}",
             fontsize=13,
         )
         out_path = os.path.join(out_dir, f"sample_{sample_id:04d}.png")
@@ -354,8 +364,10 @@ def main(args: argparse.Namespace) -> None:
     dt = float(meta.get("dataset_dt", meta_t_final / float(n_steps)))
     t_final = float(dt * n_steps)
     boundary_condition = str(meta.get("boundary_condition", "periodic" if meta.get("periodic", False) else "dirichlet"))
-    h_default = 1.0 / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
+    domain_length = float(meta.get("domain_length", 1.0))
+    h_default = domain_length / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
     h = float(meta.get("h", h_default))
+    gamma = float(meta.get("gamma", float("nan")))
 
     model = _build_model(n_x=n_x, dt=dt, boundary_condition=boundary_condition, args=args).to(device)
     ckpt = _load_checkpoint(args.checkpoint_path, map_location=device)
@@ -367,7 +379,10 @@ def main(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
     print(f"Loaded dataset: {args.dataset_path} split={args.split}")
     print(f"Loaded checkpoint: {args.checkpoint_path}")
-    print(f"Grid from data: n_x={n_x}, n_steps={n_steps}, h={h:.8f}, dt={dt:.8f}, bc={boundary_condition}")
+    print(
+        f"Grid from data: n_x={n_x}, n_steps={n_steps}, h={h:.8f}, "
+        f"dt={dt:.8f}, bc={boundary_condition}, L={domain_length:.8f}, gamma={gamma:.8f}"
+    )
 
     one_step_mse = _evaluate_one_step_mse(model, split, device=device, dt=dt)
     curves = _evaluate_rollout_curves(model, split, device=device, dt=dt, h=h)
@@ -413,6 +428,7 @@ def main(args: argparse.Namespace) -> None:
         dt=dt,
         t_final=t_final,
         h=h,
+        domain_length=domain_length,
         snapshot_times=_parse_snapshot_times(args.snapshot_times, t_final=t_final),
         n_plot_samples=args.n_plot_samples,
         out_dir=os.path.join(args.output_dir, f"{args.split}_sample_comparisons"),

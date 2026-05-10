@@ -1,5 +1,5 @@
 """
-Train a deterministic FNO latent Markov baseline on 1D Burgers data.
+Train a deterministic FNO latent Markov baseline on forced damped-driven 1D KdV data.
 
 This is the non-probabilistic counterpart to ``train_vae.py``:
   z_k = E(u_k)
@@ -234,11 +234,15 @@ def set_seed(seed: int, seed_cuda: bool = False) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train deterministic latent FNO Markov baseline on 1D Burgers")
-    parser.add_argument("--dataset-path", type=str, required=True)
-    parser.add_argument("--n-train", type=int, default=1500)
-    parser.add_argument("--n-val", type=int, default=300)
-    parser.add_argument("--n-test", type=int, default=200)
+    parser = argparse.ArgumentParser(description="Train deterministic latent FNO Markov baseline on 1D KdV")
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default="grad_flow_l2/kdv_1d/datasets/kdv_forced_periodic_L32_snx4096_nx512_dt0p1_solverdt0p01_gamma0p1.pt",
+    )
+    parser.add_argument("--n-train", type=int, default=1600)
+    parser.add_argument("--n-val", type=int, default=400)
+    parser.add_argument("--n-test", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=0)
 
@@ -251,7 +255,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-modes", type=int, default=64)
     parser.add_argument("--disable-fno-grid", action="store_true")
     parser.add_argument("--use-dt-channel", action="store_true")
-    parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument(
+        "--disable-forcing-channel",
+        action="store_true",
+        help="Disable the static forcing channel.",
+    )
     parser.add_argument("--disable-u-grad-feature", action="store_true")
 
     parser.add_argument("--lambda-recon", type=float, default=1.0)
@@ -264,13 +272,13 @@ def parse_args() -> argparse.Namespace:
         help="Save best_model_epoch_XXXX.pt snapshots of the best-so-far model every N epochs. Use <=0 to disable.",
     )
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lr-step-size", type=int, default=50, help="Decay LR every N epochs.")
+    parser.add_argument("--lr-step-size", type=int, default=100, help="Decay LR every N epochs.")
     parser.add_argument("--lr-gamma", type=float, default=0.5, help="Multiplicative LR decay for StepLR.")
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/burgers/outputs_sv")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/kdv_1d/outputs_sv")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -295,8 +303,8 @@ def _build_model(n_x: int, dt: float, boundary_condition: str, args: argparse.Na
 
 
 def main(args: argparse.Namespace) -> None:
-    set_seed(args.seed, seed_cuda=not args.cpu)
-    device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+    set_seed(args.seed, seed_cuda=args.device != "cpu")
+    device = args.device if torch.cuda.is_available() else "cpu"
     if not os.path.exists(args.dataset_path):
         raise FileNotFoundError(f"Dataset not found: {args.dataset_path}")
 
@@ -313,13 +321,19 @@ def main(args: argparse.Namespace) -> None:
     n_steps = int(train_split["u_traj"].shape[1] - 1)
     t_final = float(meta.get("t_final", 1.0))
     boundary_condition = str(meta.get("boundary_condition", "periodic" if meta.get("periodic", False) else "dirichlet"))
-    h_default = 1.0 / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
+    domain_length = float(meta.get("domain_length", 1.0))
+    h_default = domain_length / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
     h = float(meta.get("h", h_default))
     dt = float(meta.get("dataset_dt", t_final / float(n_steps)))
 
     print(f"Device: {device}")
     print(f"Loaded dataset: {args.dataset_path}")
-    print(f"Grid from data: n_x={n_x}, n_steps={n_steps}, h={h:.8f}, dt={dt:.8f}, bc={boundary_condition}")
+    print(
+        f"Grid from data: n_x={n_x}, n_steps={n_steps}, h={h:.8f}, "
+        f"dt={dt:.8f}, bc={boundary_condition}, L={domain_length:.8f}, "
+        f"gamma={float(meta.get('gamma', float('nan'))):.8f}, "
+        f"use_forcing_channel={not args.disable_forcing_channel}"
+    )
 
     train_step_loader = DataLoader(
         build_step_dataset(train_split), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers
