@@ -1,5 +1,5 @@
 """
-Training entrypoint for the 1D Burgers latent VAE model.
+Training entrypoint for the unforced 1D Kuramoto-Sivashinsky latent VAE model.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def rollout_vae_mean(
     return traj
 
 
-class BurgersLatentVAETrainer1D:
+class KSLatentVAETrainer1D:
     def __init__(
         self,
         model: LatentVAE1D,
@@ -415,12 +415,12 @@ class BurgersLatentVAETrainer1D:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train latent VAE model on 1D Burgers data")
+    parser = argparse.ArgumentParser(description="Train latent VAE model on unforced 1D Kuramoto-Sivashinsky data")
     parser.add_argument(
         "--dataset-path",
         type=str,
-        default="grad_flow_l2/datasets/burgers_periodic_forced_l2_nu0p01_nx256_steps10.pt",
-        help="Path to cached Burgers dataset (.pt)",
+        default="grad_flow_l2/ks1d/datasets/ks_periodic_L32pi_snx1024_nx256_dt1_solverdt0p01.pt",
+        help="Path to cached KS dataset (.pt)",
     )
     parser.add_argument("--n-train", type=int, default=3000)
     parser.add_argument("--n-val", type=int, default=500)
@@ -437,7 +437,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-modes", type=int, default=16)
     parser.add_argument("--disable-fno-grid", action="store_true")
     parser.add_argument("--use-dt-channel", action="store_true")
-    parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument(
+        "--disable-forcing-channel",
+        action="store_true",
+        default=True,
+        help="Compatibility flag; KS VAE training always disables the forcing channel.",
+    )
     parser.add_argument("--disable-u-grad-feature", action="store_true")
     parser.add_argument("--amp-head-hidden", type=int, default=32)
 
@@ -474,13 +479,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--no-epoch-pbar", action="store_true", help="Disable per-epoch batch progress bar.")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/burgers/outputs_vae")
+    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ks1d/outputs_vae")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
 def _build_model(n_x: int, dt: float, boundary_condition: str, args: argparse.Namespace) -> LatentVAE1D:
-    use_forcing_channel = not args.disable_forcing_channel
+    use_forcing_channel = False
     fno_width = args.hidden_channels if args.fno_width is None else args.fno_width
 
     encoder = VariationalStateEncoder1D(
@@ -583,7 +588,8 @@ def main(args: argparse.Namespace) -> None:
     n_steps = int(train_split["u_traj"].shape[1] - 1)
     t_final = float(meta.get("t_final", 1.0))
     boundary_condition = str(meta.get("boundary_condition", "periodic" if meta.get("periodic", False) else "dirichlet"))
-    h_default = 1.0 / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
+    domain_length = float(meta.get("domain_length", 1.0))
+    h_default = domain_length / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
     h = float(meta.get("h", h_default))
     dt = t_final / float(n_steps)
 
@@ -616,7 +622,7 @@ def main(args: argparse.Namespace) -> None:
     with open(os.path.join(run_dir, "args.json"), "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2)
 
-    trainer = BurgersLatentVAETrainer1D(
+    trainer = KSLatentVAETrainer1D(
         model=model,
         dt=dt,
         h=h,
@@ -645,9 +651,10 @@ def main(args: argparse.Namespace) -> None:
     print(
         f"Training config: epochs={args.epochs}, lr={args.lr}, "
         f"lr_step_size={args.lr_step_size}, lr_gamma={args.lr_gamma}, "
-        f"beta_kl={args.beta_kl}, lambda_rec={args.lambda_rec}, "
-        f"fno_width={args.hidden_channels if args.fno_width is None else args.fno_width}, "
-        f"fno_layers={args.fno_layers}, fno_modes={args.fno_modes}, "
+            f"beta_kl={args.beta_kl}, lambda_rec={args.lambda_rec}, "
+            f"fno_width={args.hidden_channels if args.fno_width is None else args.fno_width}, "
+            f"fno_layers={args.fno_layers}, fno_modes={args.fno_modes}, "
+            f"use_forcing_channel=False, "
         f"noise_corr_length={args.noise_corr_length}, noise_decay_s={args.noise_decay_s}, "
         f"spectral_var_floor={args.spectral_var_floor}, "
         f"checkpoint_interval={args.checkpoint_interval}, "

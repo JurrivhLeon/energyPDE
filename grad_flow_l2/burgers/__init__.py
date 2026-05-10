@@ -1,5 +1,3 @@
-"""Burgers training package for hidden-space gradient-flow models."""
+"""Burgers training and evaluation package."""
 
-from .trainer import HiddenGradientFlowTrainer
-
-__all__ = ["HiddenGradientFlowTrainer"]
+__all__: list[str] = []

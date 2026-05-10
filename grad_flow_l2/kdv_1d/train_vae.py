@@ -1,5 +1,5 @@
 """
-Training entrypoint for the 1D Burgers latent VAE model.
+Training entrypoint for the forced damped-driven 1D KdV latent VAE model.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def rollout_vae_mean(
     return traj
 
 
-class BurgersLatentVAETrainer1D:
+class KDVLatentVAETrainer1D:
     def __init__(
         self,
         model: LatentVAE1D,
@@ -415,12 +415,12 @@ class BurgersLatentVAETrainer1D:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train latent VAE model on 1D Burgers data")
+    parser = argparse.ArgumentParser(description="Train latent VAE model on forced damped-driven 1D KdV data")
     parser.add_argument(
         "--dataset-path",
         type=str,
-        default="grad_flow_l2/datasets/burgers_periodic_forced_l2_nu0p01_nx256_steps10.pt",
-        help="Path to cached Burgers dataset (.pt)",
+        default="grad_flow_l2/kdv_1d/datasets/kdv_forced_periodic_L32_snx4096_nx512_dt0p1_solverdt0p01_gamma0p1.pt",
+        help="Path to cached KdV dataset (.pt)",
     )
     parser.add_argument("--n-train", type=int, default=3000)
     parser.add_argument("--n-val", type=int, default=500)
@@ -437,7 +437,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-modes", type=int, default=16)
     parser.add_argument("--disable-fno-grid", action="store_true")
     parser.add_argument("--use-dt-channel", action="store_true")
-    parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument(
+        "--disable-forcing-channel",
+        action="store_true",
+        help="Disable the static forcing channel.",
+    )
     parser.add_argument("--disable-u-grad-feature", action="store_true")
     parser.add_argument("--amp-head-hidden", type=int, default=32)
 
@@ -472,9 +476,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--no-epoch-pbar", action="store_true", help="Disable per-epoch batch progress bar.")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/burgers/outputs_vae")
+    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/kdv_1d/outputs_vae")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -558,8 +562,8 @@ def _assert_dry_run_shapes(model: LatentVAE1D, loader: DataLoader, device: str, 
 
 
 def main(args: argparse.Namespace) -> None:
-    set_seed(args.seed, seed_cuda=not args.cpu)
-    device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+    set_seed(args.seed, seed_cuda=args.device != "cpu")
+    device = args.device if torch.cuda.is_available() else "cpu"
 
     if not os.path.exists(args.dataset_path):
         raise FileNotFoundError(f"Dataset not found: {args.dataset_path}")
@@ -583,15 +587,17 @@ def main(args: argparse.Namespace) -> None:
     n_steps = int(train_split["u_traj"].shape[1] - 1)
     t_final = float(meta.get("t_final", 1.0))
     boundary_condition = str(meta.get("boundary_condition", "periodic" if meta.get("periodic", False) else "dirichlet"))
-    h_default = 1.0 / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
+    domain_length = float(meta.get("domain_length", 1.0))
+    h_default = domain_length / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
     h = float(meta.get("h", h_default))
-    dt = t_final / float(n_steps)
+    dt = float(meta.get("dataset_dt", t_final / float(n_steps)))
+    gamma = float(meta.get("gamma", float("nan")))
 
     print(f"Device: {device}")
     print(f"Loaded dataset: {args.dataset_path}")
     print(
         f"Grid from data: n_x={n_x}, n_steps={n_steps}, t_final={t_final:.6f}, "
-        f"h={h:.6f}, dt={dt:.6f}, boundary_condition={boundary_condition}"
+        f"h={h:.6f}, dt={dt:.6f}, gamma={gamma:.6f}, boundary_condition={boundary_condition}"
     )
 
     train_step_ds = build_step_dataset(train_split)
@@ -616,7 +622,7 @@ def main(args: argparse.Namespace) -> None:
     with open(os.path.join(run_dir, "args.json"), "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2)
 
-    trainer = BurgersLatentVAETrainer1D(
+    trainer = KDVLatentVAETrainer1D(
         model=model,
         dt=dt,
         h=h,
@@ -645,9 +651,10 @@ def main(args: argparse.Namespace) -> None:
     print(
         f"Training config: epochs={args.epochs}, lr={args.lr}, "
         f"lr_step_size={args.lr_step_size}, lr_gamma={args.lr_gamma}, "
-        f"beta_kl={args.beta_kl}, lambda_rec={args.lambda_rec}, "
-        f"fno_width={args.hidden_channels if args.fno_width is None else args.fno_width}, "
-        f"fno_layers={args.fno_layers}, fno_modes={args.fno_modes}, "
+            f"beta_kl={args.beta_kl}, lambda_rec={args.lambda_rec}, "
+            f"fno_width={args.hidden_channels if args.fno_width is None else args.fno_width}, "
+            f"fno_layers={args.fno_layers}, fno_modes={args.fno_modes}, "
+            f"use_forcing_channel={not args.disable_forcing_channel}, "
         f"noise_corr_length={args.noise_corr_length}, noise_decay_s={args.noise_decay_s}, "
         f"spectral_var_floor={args.spectral_var_floor}, "
         f"checkpoint_interval={args.checkpoint_interval}, "

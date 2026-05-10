@@ -1,5 +1,5 @@
 """
-Train a deterministic FNO latent Markov baseline on 1D Burgers data.
+Train a deterministic FNO latent Markov baseline on unforced 1D KS data.
 
 This is the non-probabilistic counterpart to ``train_vae.py``:
   z_k = E(u_k)
@@ -234,8 +234,12 @@ def set_seed(seed: int, seed_cuda: bool = False) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train deterministic latent FNO Markov baseline on 1D Burgers")
-    parser.add_argument("--dataset-path", type=str, required=True)
+    parser = argparse.ArgumentParser(description="Train deterministic latent FNO Markov baseline on 1D KS")
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default="grad_flow_l2/ks1d/datasets/ks_periodic_L32pi_snx1024_nx256_dt1_solverdt0p01.pt",
+    )
     parser.add_argument("--n-train", type=int, default=1500)
     parser.add_argument("--n-val", type=int, default=300)
     parser.add_argument("--n-test", type=int, default=200)
@@ -251,7 +255,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-modes", type=int, default=64)
     parser.add_argument("--disable-fno-grid", action="store_true")
     parser.add_argument("--use-dt-channel", action="store_true")
-    parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument(
+        "--disable-forcing-channel",
+        action="store_true",
+        default=True,
+        help="Compatibility flag; KS deterministic training always disables the forcing channel.",
+    )
     parser.add_argument("--disable-u-grad-feature", action="store_true")
 
     parser.add_argument("--lambda-recon", type=float, default=1.0)
@@ -270,7 +279,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/burgers/outputs_sv")
+    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ks1d/outputs_sv")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -286,7 +295,7 @@ def _build_model(n_x: int, dt: float, boundary_condition: str, args: argparse.Na
         fno_width=args.fno_width,
         fno_layers=args.fno_layers,
         fno_modes=args.fno_modes,
-        use_forcing_channel=not args.disable_forcing_channel,
+        use_forcing_channel=False,
         use_dt_channel=args.use_dt_channel,
         use_grid_features=not args.disable_fno_grid,
         use_grad_features=not args.disable_u_grad_feature,
@@ -313,13 +322,17 @@ def main(args: argparse.Namespace) -> None:
     n_steps = int(train_split["u_traj"].shape[1] - 1)
     t_final = float(meta.get("t_final", 1.0))
     boundary_condition = str(meta.get("boundary_condition", "periodic" if meta.get("periodic", False) else "dirichlet"))
-    h_default = 1.0 / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
+    domain_length = float(meta.get("domain_length", 1.0))
+    h_default = domain_length / float(n_x) if boundary_condition == "periodic" else 1.0 / float(n_x + 1)
     h = float(meta.get("h", h_default))
     dt = float(meta.get("dataset_dt", t_final / float(n_steps)))
 
     print(f"Device: {device}")
     print(f"Loaded dataset: {args.dataset_path}")
-    print(f"Grid from data: n_x={n_x}, n_steps={n_steps}, h={h:.8f}, dt={dt:.8f}, bc={boundary_condition}")
+    print(
+        f"Grid from data: n_x={n_x}, n_steps={n_steps}, h={h:.8f}, "
+        f"dt={dt:.8f}, bc={boundary_condition}, L={domain_length:.8f}, use_forcing_channel=False"
+    )
 
     train_step_loader = DataLoader(
         build_step_dataset(train_split), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers

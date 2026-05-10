@@ -1,0 +1,67 @@
+{
+  "name": "burgers_1d_periodic_grfu0_static_elastic_forcing",
+  "description": "Reference Burgers trajectory generation scheme with smooth GRF-style initial conditions, static Hookean elastic forcing, high-resolution reference solve, and downsampled stored fields.",
+  "equation": "u_t + (u^2 / 2)_x = nu u_xx + f(x)",
+  "boundary_condition": "periodic",
+  "domain": "[0, 1)",
+  "stored_resolution": {
+    "n_x": 512,
+    "dataset_dt": 0.1,
+    "train_time_interval": [0.0, 1.0],
+    "evaluation_time_interval": [0.0, 5.0]
+  },
+  "reference_solver": {
+    "solver_n_x": 8192,
+    "solver_dt": 0.001,
+    "downsampling": "spectral_truncate_periodic_field_1d"
+  },
+  "initial_condition": {
+    "sampler": "mixed",
+    "grf_probability": 1.0,
+    "amplitude": 1.0,
+    "length_scale_range": [0.06, 0.35],
+    "max_modes": 3,
+    "zero_mean": true,
+    "l2_norm_target_range": [0.6, 1.0],
+    "pointwise_abs_cap": 1.0
+  },
+  "forcing": {
+    "mode": "mixed",
+    "sampler": "elastic",
+    "definition": "sample smooth displacement q(x), then set f(x) = -elastic_stiffness * q(x), followed by amplitude/L2 normalization and pointwise clipping",
+    "elastic_stiffness": 1.0,
+    "amplitude": 0.25,
+    "grf_probability": 1.0,
+    "length_scale_range": [0.06, 0.35],
+    "max_modes": 3,
+    "zero_mean": true,
+    "l2_norm_target_range": [0.1, 0.25],
+    "pointwise_abs_cap": 0.25
+  },
+  "recommended_viscosities_to_check": [0.01, 0.001],
+  "example_command_nu_0p01": [
+    "python",
+    "-m",
+    "grad_flow_l2.burgers_data",
+    "--n-x", "512",
+    "--solver-n-x", "8192",
+    "--n-steps", "50",
+    "--t-final", "5.0",
+    "--dataset-dt", "0.1",
+    "--solver-dt", "0.001",
+    "--nu", "0.01",
+    "--u0-sampler", "mixed",
+    "--forcing-mode", "mixed",
+    "--forcing-sampler", "elastic",
+    "--elastic-stiffness", "1.0",
+    "--f-amplitude", "0.25",
+    "--f-grf-prob", "1.0",
+    "--f-max-modes", "3",
+    "--target-u0-norm-min", "0.6",
+    "--target-u0-norm-max", "1.0",
+    "--target-f-norm-min", "0.1",
+    "--target-f-norm-max", "0.25",
+    "--target-u0-abs-max", "1.0",
+    "--target-f-abs-max", "0.25"
+  ]
+}
