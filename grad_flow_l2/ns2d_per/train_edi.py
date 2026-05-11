@@ -21,28 +21,30 @@ try:
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
-    from ..latent_markov import (
+    from ..grad_flow2d import (
+        EnergyHead2D,
         FNOProximalStepSimulator2D,
-        LatentMarkovModel2D,
+        HiddenGradientFlowModel2D,
         ProximalStepSimulator2D,
         StateDecoder2D,
         StateEncoder2D,
     )
-    from ..latent_markov_trainer import LatentMarkovTrainer2D
+    from ..navier_stokes2d.trainer import HiddenGradientFlowTrainer2D
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.navier_stokes2d_per_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
-    from grad_flow_l2.latent_markov import (
+    from grad_flow_l2.grad_flow2d import (
+        EnergyHead2D,
         FNOProximalStepSimulator2D,
-        LatentMarkovModel2D,
+        HiddenGradientFlowModel2D,
         ProximalStepSimulator2D,
         StateDecoder2D,
         StateEncoder2D,
     )
-    from grad_flow_l2.latent_markov_trainer import LatentMarkovTrainer2D
+    from grad_flow_l2.navier_stokes2d.trainer import HiddenGradientFlowTrainer2D
 
 
 def set_seed(seed: int, seed_cuda: bool = False) -> None:
@@ -51,12 +53,6 @@ def set_seed(seed: int, seed_cuda: bool = False) -> None:
     torch.manual_seed(seed)
     if seed_cuda:
         torch.cuda.manual_seed_all(seed)
-
-
-def seed_worker(worker_id: int) -> None:
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,8 +78,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-modes-x", type=int, default=16)
     parser.add_argument("--fno-modes-y", type=int, default=16)
     parser.add_argument("--disable-fno-grid", action="store_true")
+    parser.add_argument("--energy-layers", type=int, default=4)
+    parser.add_argument("--energy-head-type", type=str, default="local", choices=["local", "fno"])
+    parser.add_argument("--energy-fno-modes-x", type=int, default=16)
+    parser.add_argument("--energy-fno-modes-y", type=int, default=16)
+    parser.add_argument(
+        "--disable-energy-head",
+        action="store_true",
+        dest="disable_energy_head",
+        help="Do not build the latent energy head. This is the default unless --enable-energy-head is passed.",
+    )
+    parser.add_argument(
+        "--enable-energy-head",
+        action="store_false",
+        dest="disable_energy_head",
+        help="Build the latent energy head for monotonicity or EDI losses.",
+    )
+    parser.set_defaults(disable_energy_head=True)
     parser.add_argument("--use-dt-channel", action="store_true")
     parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument("--disable-z-grad-feature", action="store_true")
     parser.add_argument("--disable-u-grad-feature", action="store_true")
 
     parser.add_argument("--epochs", type=int, default=200)
@@ -100,6 +114,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-recon", type=float, default=1.0)
+    parser.add_argument("--lambda-mono", type=float, default=0.0)
+    parser.add_argument("--lambda-prox", type=float, default=0.0)
     parser.add_argument("--lambda-spec", type=float, default=1.0)
     parser.add_argument("--spectral-s", type=float, default=1.0)
 
@@ -111,9 +127,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_model(n_x: int, n_y: int, h_x: float, h_y: float, dt: float, args: argparse.Namespace) -> LatentMarkovModel2D:
+def _build_model(n_x: int, n_y: int, h_x: float, h_y: float, dt: float, args: argparse.Namespace) -> HiddenGradientFlowModel2D:
     boundary_condition = "periodic"
     use_forcing_channel = not args.disable_forcing_channel
+    disable_energy_head = getattr(args, "disable_energy_head", False)
     encoder = StateEncoder2D(
         n_x=n_x,
         n_y=n_y,
@@ -161,10 +178,31 @@ def _build_model(n_x: int, n_y: int, h_x: float, h_y: float, dt: float, args: ar
     else:
         raise ValueError(f"Unsupported prox-simulator-type: {args.prox_simulator_type}")
 
-    return LatentMarkovModel2D(
+    if disable_energy_head:
+        if args.lambda_mono > 0.0 or args.lambda_prox > 0.0:
+            raise ValueError("--enable-energy-head is required when --lambda-mono or --lambda-prox is positive")
+        energy_head = None
+    else:
+        energy_head = EnergyHead2D(
+            n_x=n_x,
+            n_y=n_y,
+            h_x=h_x,
+            h_y=h_y,
+            latent_channels=args.latent_channels,
+            hidden_channels=args.hidden_channels,
+            n_layers=args.energy_layers,
+            use_forcing_channel=use_forcing_channel,
+            use_grad_norm_feature=not args.disable_z_grad_feature,
+            boundary_condition=boundary_condition,
+            head_type=args.energy_head_type,
+            energy_fno_modes_x=args.energy_fno_modes_x,
+            energy_fno_modes_y=args.energy_fno_modes_y,
+        )
+    return HiddenGradientFlowModel2D(
         encoder=encoder,
         decoder=decoder,
-        transition=prox_step,
+        prox_step=prox_step,
+        energy_head=energy_head,
     )
 
 
@@ -215,44 +253,35 @@ def main(args: argparse.Namespace) -> None:
     val_traj_ds = build_navier_stokes2d_periodic_trajectory_dataset_from_split(val_split)
     test_traj_ds = build_navier_stokes2d_periodic_trajectory_dataset_from_split(test_split)
 
-    loader_generator = torch.Generator()
-    loader_generator.manual_seed(args.seed)
-
     train_step_loader = DataLoader(
         train_step_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        worker_init_fn=seed_worker,
-        generator=loader_generator,
     )
     val_step_loader = DataLoader(
         val_step_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        worker_init_fn=seed_worker,
     )
     test_step_loader = DataLoader(
         test_step_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        worker_init_fn=seed_worker,
     )
     val_traj_loader = DataLoader(
         val_traj_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        worker_init_fn=seed_worker,
     )
     test_traj_loader = DataLoader(
         test_traj_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        worker_init_fn=seed_worker,
     )
 
     model = _build_model(n_x=n_x, n_y=n_y, h_x=h_x, h_y=h_y, dt=dt, args=args)
@@ -267,12 +296,14 @@ def main(args: argparse.Namespace) -> None:
 
     model = model.to(device)
 
-    trainer = LatentMarkovTrainer2D(
+    trainer = HiddenGradientFlowTrainer2D(
         model=model,
         dt=dt,
         h_x=h_x,
         h_y=h_y,
         lambda_recon=args.lambda_recon,
+        lambda_mono=args.lambda_mono,
+        lambda_prox=args.lambda_prox,
         lambda_spec=args.lambda_spec,
         spectral_s=args.spectral_s,
         lr=args.lr,
@@ -280,6 +311,7 @@ def main(args: argparse.Namespace) -> None:
         lr_gamma=args.lr_gamma,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
+        max_epochs=args.epochs,
         device=device,
         output_dir=run_dir,
         show_epoch_pbar=not args.no_epoch_pbar,
@@ -295,7 +327,9 @@ def main(args: argparse.Namespace) -> None:
     print(
         f"Training config: epochs={args.epochs}, lr={args.lr}, "
         f"lr_step_size={args.lr_step_size}, lr_gamma={args.lr_gamma}, "
-        f"lambda_recon={args.lambda_recon}, lambda_spec={args.lambda_spec}, spectral_s={args.spectral_s}, "
+        f"lambda_recon={args.lambda_recon}, lambda_mono={args.lambda_mono}, "
+        f"lambda_prox={args.lambda_prox}, lambda_spec={args.lambda_spec}, spectral_s={args.spectral_s}, "
+        f"energy_head={not args.disable_energy_head}, "
         f"prox_type={args.prox_simulator_type}, "
         f"fno_modes=({args.fno_modes_x},{args.fno_modes_y}), "
         f"epoch_pbar={not args.no_epoch_pbar}, "

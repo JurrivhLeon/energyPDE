@@ -1,8 +1,9 @@
 """
-Model components for 2D Navier-Stokes hidden-space gradient-flow learning.
+Energy-free latent Markov components for 2D Navier-Stokes.
 
-Key constraint:
+Key constraints:
   - Encoder/decoder consume only the state u (not forcing f).
+  - The model has no energy head and no monotonicity/EDI interface.
 """
 
 from __future__ import annotations
@@ -552,161 +553,11 @@ class FNOProximalStepSimulator2D(nn.Module):
         return z_next
 
 
-class EnergyHead2D(nn.Module):
+class LatentMarkovModel2D(nn.Module):
     """
-    Latent energy head.
-
-    local mode:
-      E(z; f) = integral softplus(rho_local(z,f))
-
-    fno mode:
-      E(z; f) = integral [softplus(rho_local(z,f)) + softplus(rho_spec(z,f))]
-    """
-
-    def __init__(
-        self,
-        n_x: int,
-        n_y: int,
-        h_x: float,
-        h_y: float,
-        latent_channels: int = 16,
-        hidden_channels: int = 64,
-        n_layers: int = 4,
-        use_forcing_channel: bool = True,
-        use_grad_norm_feature: bool = True,
-        boundary_condition: str = "dirichlet",
-        head_type: str = "local",
-        energy_fno_modes_x: int = 16,
-        energy_fno_modes_y: int = 16,
-        energy_fno_width: Optional[int] = None,
-        energy_fno_layers: Optional[int] = None,
-    ):
-        super().__init__()
-        self.n_x = n_x
-        self.n_y = n_y
-        self.area = float(h_x) * float(h_y)
-        self.latent_channels = latent_channels
-        self.use_forcing_channel = use_forcing_channel
-        self.use_grad_norm_feature = use_grad_norm_feature
-        self.boundary_condition = _normalize_boundary_condition(boundary_condition)
-        self.padding_mode = _padding_mode_from_boundary_condition(self.boundary_condition)
-        self.head_type = head_type.lower().strip()
-        if self.head_type not in ("local", "fno"):
-            raise ValueError("head_type must be one of {'local', 'fno'}")
-
-        in_channels = latent_channels + (1 if use_forcing_channel else 0) + (1 if use_grad_norm_feature else 0)
-
-        # Local branch.
-        local_layers = [
-            nn.Conv2d(
-                in_channels,
-                hidden_channels,
-                kernel_size=3,
-                padding=1,
-                padding_mode=self.padding_mode,
-            ),
-            nn.GELU(),
-        ]
-        for _ in range(max(1, n_layers - 1)):
-            local_layers.extend(
-                [
-                    nn.Conv2d(
-                        hidden_channels,
-                        hidden_channels,
-                        kernel_size=3,
-                        padding=1,
-                        padding_mode=self.padding_mode,
-                    ),
-                    nn.GELU(),
-                ]
-            )
-        self.local_backbone = nn.Sequential(*local_layers)
-        self.local_density_head = nn.Conv2d(hidden_channels, 1, kernel_size=1)
-
-        # Optional spectral branch.
-        self.use_spectral_branch = self.head_type == "fno"
-        if self.use_spectral_branch:
-            spectral_width = int(energy_fno_width if energy_fno_width is not None else hidden_channels)
-            spectral_layers = int(energy_fno_layers if energy_fno_layers is not None else n_layers)
-            if spectral_width <= 0:
-                raise ValueError("energy_fno_width must be > 0")
-            if spectral_layers < 1:
-                raise ValueError("energy_fno_layers must be >= 1")
-            if energy_fno_modes_x < 1 or energy_fno_modes_y < 1:
-                raise ValueError("energy_fno_modes_x/y must be >= 1")
-
-            self.spectral_in_proj = nn.Conv2d(in_channels, spectral_width, kernel_size=1)
-            self.spectral_blocks = nn.ModuleList(
-                [FNOBlock2D(spectral_width, modes_x=energy_fno_modes_x, modes_y=energy_fno_modes_y) for _ in range(spectral_layers)]
-            )
-            self.spectral_density_head = nn.Conv2d(spectral_width, 1, kernel_size=1)
-        else:
-            self.spectral_in_proj = None
-            self.spectral_blocks = None
-            self.spectral_density_head = None
-
-    def _estimate_grad_norm(self, z: torch.Tensor) -> torch.Tensor:
-        pad_kwargs = {"mode": _fpad_mode_from_boundary_condition(self.boundary_condition)}
-        if pad_kwargs["mode"] == "constant":
-            pad_kwargs["value"] = 0.0
-        z_pad = F.pad(z, (1, 1, 1, 1), **pad_kwargs)
-        z_x = 0.5 * (z_pad[:, :, 2:, 1:-1] - z_pad[:, :, :-2, 1:-1])
-        z_y = 0.5 * (z_pad[:, :, 1:-1, 2:] - z_pad[:, :, 1:-1, :-2])
-        return torch.sqrt(torch.sum(z_x * z_x + z_y * z_y, dim=1, keepdim=True) + 1e-12)
-
-    def _build_input_features(self, z: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
-        feat = [z]
-        if self.use_forcing_channel:
-            f_int = _to_interior_forcing_2d(f, n_x=self.n_x, n_y=self.n_y)
-            if f_int.shape[0] == 1 and z.shape[0] > 1:
-                f_int = f_int.expand(z.shape[0], -1, -1)
-            if f_int.shape[0] != z.shape[0]:
-                raise ValueError("forcing batch size must match z batch size or be 1")
-            feat.append(f_int.unsqueeze(1))
-        if self.use_grad_norm_feature:
-            feat.append(self._estimate_grad_norm(z))
-        return torch.cat(feat, dim=1)
-
-    def forward(self, z: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
-        squeeze = False
-        if z.dim() == 3:
-            z = z.unsqueeze(0)
-            f = f.unsqueeze(0)
-            squeeze = True
-        if z.dim() != 4:
-            raise ValueError(
-                f"z must have shape (latent_channels,n_x,n_y) or (batch,latent_channels,n_x,n_y), got {tuple(z.shape)}"
-            )
-        if z.shape[1] != self.latent_channels:
-            raise ValueError(f"Expected latent_channels={self.latent_channels}, got {z.shape[1]}")
-        if z.shape[2:] != (self.n_x, self.n_y):
-            raise ValueError(f"z spatial shape must be ({self.n_x},{self.n_y}), got {tuple(z.shape[2:])}")
-
-        x = self._build_input_features(z, f)
-
-        local_hidden = self.local_backbone(x)
-        local_density = F.softplus(self.local_density_head(local_hidden)).squeeze(1)
-
-        if self.use_spectral_branch:
-            spec_hidden = self.spectral_in_proj(x)
-            for block in self.spectral_blocks:
-                spec_hidden = block(spec_hidden)
-            spectral_density = F.softplus(self.spectral_density_head(spec_hidden)).squeeze(1)
-            density = local_density + spectral_density
-        else:
-            density = local_density
-
-        energy = self.area * torch.sum(density, dim=(1, 2))
-        if squeeze:
-            return energy.squeeze(0)
-        return energy
-
-
-class HiddenGradientFlowModel2D(nn.Module):
-    """
-    Hidden-space model:
+    Hidden-space latent Markov model:
       z_k = Enc(u_k)
-      z_{k+1} = Prox(z_k, f, dt)
+      z_{k+1} = T(z_k, f, dt)
       u_{k+1} = Dec(z_{k+1})
     """
 
@@ -714,29 +565,23 @@ class HiddenGradientFlowModel2D(nn.Module):
         self,
         encoder: StateEncoder2D,
         decoder: StateDecoder2D,
-        prox_step: nn.Module,
-        energy_head: Optional[EnergyHead2D] = None,
+        transition: nn.Module,
     ):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
-        self.prox_step = prox_step
-        self.energy_head = energy_head
+        # Keep the historical state_dict prefix for checkpoint compatibility.
+        self.prox_step = transition
 
     @property
     def has_energy_head(self) -> bool:
-        return self.energy_head is not None
+        return False
 
     def encode(self, u: torch.Tensor) -> torch.Tensor:
         return self.encoder(u)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         return self.decoder(z)
-
-    def latent_energy(self, z: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
-        if self.energy_head is None:
-            raise RuntimeError("latent_energy was requested, but this model was built without an energy head")
-        return self.energy_head(z, f)
 
     def predict_latent_step(self, z_k: torch.Tensor, f: torch.Tensor, dt=None) -> torch.Tensor:
         return self.prox_step(z_k, f, dt=dt)
@@ -748,10 +593,6 @@ class HiddenGradientFlowModel2D(nn.Module):
         if return_latent:
             return u_next, z_k, z_next
         return u_next
-
-    def energy(self, u: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
-        z = self.encode(u)
-        return self.latent_energy(z, f)
 
     def forward(self, u_k: torch.Tensor, f: torch.Tensor, dt=None) -> torch.Tensor:
         return self.predict_step(u_k, f, dt=dt, return_latent=False)
@@ -765,6 +606,5 @@ __all__ = [
     "SpectralConv2d",
     "FNOBlock2D",
     "FNOProximalStepSimulator2D",
-    "EnergyHead2D",
-    "HiddenGradientFlowModel2D",
+    "LatentMarkovModel2D",
 ]
