@@ -5,6 +5,7 @@ Training entrypoint for the periodic 2D Navier-Stokes latent VAE model.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -86,6 +87,12 @@ def set_seed(seed: int, seed_cuda: bool = False) -> None:
     torch.manual_seed(seed)
     if seed_cuda:
         torch.cuda.manual_seed_all(seed)
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def kl_diag_gaussians(
@@ -329,15 +336,24 @@ class PeriodicLatentVAETrainer2D:
 
         return metrics
 
-    def _save_checkpoint(self, name: str, epoch: int, metrics: Dict[str, float]) -> None:
+    def _save_checkpoint(
+        self,
+        name: str,
+        epoch: int,
+        metrics: Dict[str, float],
+        model_state_dict: Optional[Dict[str, torch.Tensor]] = None,
+        optimizer_state_dict: Optional[Dict[str, object]] = None,
+    ) -> None:
         if self.output_dir is None:
             return
         os.makedirs(self.output_dir, exist_ok=True)
         torch.save(
             {
                 "epoch": epoch,
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
+                "model_state_dict": model_state_dict if model_state_dict is not None else self.model.state_dict(),
+                "optimizer_state_dict": (
+                    optimizer_state_dict if optimizer_state_dict is not None else self.optimizer.state_dict()
+                ),
                 "metrics": metrics,
                 "dt": self.dt,
                 "h_x": self.h_x,
@@ -361,6 +377,10 @@ class PeriodicLatentVAETrainer2D:
     ) -> Dict[str, list]:
         history = {"train": [], "val": []}
         best_metric = float("inf")
+        best_epoch = 0
+        best_metrics: Optional[Dict[str, float]] = None
+        best_model_state: Optional[Dict[str, torch.Tensor]] = None
+        best_optimizer_state: Optional[Dict[str, object]] = None
         checkpoint_interval = int(checkpoint_interval)
 
         for epoch in range(1, epochs + 1):
@@ -375,6 +395,10 @@ class PeriodicLatentVAETrainer2D:
                 monitor = val_metrics.get("val_rollout_rel_l2", val_metrics["val_loss_step"])
                 if monitor < best_metric:
                     best_metric = monitor
+                    best_epoch = epoch
+                    best_metrics = val_metrics
+                    best_model_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                    best_optimizer_state = copy.deepcopy(self.optimizer.state_dict())
                     self._save_checkpoint("best_model.pt", epoch, val_metrics)
 
                 print(
@@ -402,7 +426,16 @@ class PeriodicLatentVAETrainer2D:
                 )
 
             if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
-                self._save_checkpoint(f"checkpoint_epoch_{epoch:04d}.pt", epoch, latest_metrics)
+                if best_model_state is not None and best_metrics is not None:
+                    self._save_checkpoint(
+                        f"best_model_through_epoch_{epoch:04d}.pt",
+                        best_epoch,
+                        best_metrics,
+                        model_state_dict=best_model_state,
+                        optimizer_state_dict=best_optimizer_state,
+                    )
+                else:
+                    self._save_checkpoint(f"best_model_through_epoch_{epoch:04d}.pt", epoch, latest_metrics)
 
             self.scheduler.step()
 
@@ -583,15 +616,17 @@ def main(args: argparse.Namespace) -> None:
     n_y = int(train_split["u0"].shape[2])
     n_steps = int(train_split["u_traj"].shape[1] - 1)
     t_final = float(meta.get("t_final", 1.0))
+    t_start = float(meta.get("stored_t_start", meta.get("warmup_time", 0.0)))
+    stored_horizon = float(meta.get("stored_time_horizon", t_final - t_start))
     h_x = 1.0 / float(n_x)
     h_y = 1.0 / float(n_y)
-    dt = t_final / float(n_steps)
+    dt = float(meta.get("record_dt", stored_horizon / float(n_steps)))
 
     print(f"Device: {device}")
     print(f"Loaded dataset: {args.dataset_path}")
     print(
         f"Grid from data: n_x={n_x}, n_y={n_y}, n_steps={n_steps}, "
-        f"t_final={t_final:.6f}, dt={dt:.6f}"
+        f"stored_time=[{t_start:.6f},{t_start + dt * n_steps:.6f}], dt={dt:.6f}"
     )
 
     train_step_ds = build_navier_stokes2d_periodic_step_dataset(train_split)
@@ -600,11 +635,45 @@ def main(args: argparse.Namespace) -> None:
     val_traj_ds = build_navier_stokes2d_periodic_trajectory_dataset_from_split(val_split)
     test_traj_ds = build_navier_stokes2d_periodic_trajectory_dataset_from_split(test_split)
 
-    train_step_loader = DataLoader(train_step_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    val_step_loader = DataLoader(val_step_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-    test_step_loader = DataLoader(test_step_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-    val_traj_loader = DataLoader(val_traj_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-    test_traj_loader = DataLoader(test_traj_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.seed)
+
+    train_step_loader = DataLoader(
+        train_step_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
+        generator=loader_generator,
+    )
+    val_step_loader = DataLoader(
+        val_step_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
+    )
+    test_step_loader = DataLoader(
+        test_step_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
+    )
+    val_traj_loader = DataLoader(
+        val_traj_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
+    )
+    test_traj_loader = DataLoader(
+        test_traj_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
+    )
 
     model = _build_model(n_x=n_x, n_y=n_y, dt=dt, args=args).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

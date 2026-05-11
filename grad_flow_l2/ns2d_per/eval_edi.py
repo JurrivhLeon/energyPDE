@@ -8,7 +8,6 @@ import argparse
 import csv
 import json
 import os
-import random
 from typing import Dict, List
 
 import numpy as np
@@ -17,30 +16,22 @@ import torch.nn.functional as F
 
 try:
     from ..heat_data import load_dataset_splits
-    from ..latent_markov import (
+    from ..grad_flow2d import (
         FNOProximalStepSimulator2D,
-        LatentMarkovModel2D,
+        HiddenGradientFlowModel2D,
         ProximalStepSimulator2D,
         StateDecoder2D,
         StateEncoder2D,
     )
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
-    from grad_flow_l2.latent_markov import (
+    from grad_flow_l2.grad_flow2d import (
         FNOProximalStepSimulator2D,
-        LatentMarkovModel2D,
+        HiddenGradientFlowModel2D,
         ProximalStepSimulator2D,
         StateDecoder2D,
         StateEncoder2D,
     )
-
-
-def set_seed(seed: int, seed_cuda: bool = False) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if seed_cuda:
-        torch.cuda.manual_seed_all(seed)
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,8 +47,39 @@ def parse_args() -> argparse.Namespace:
         default=10.0,
         help="L-infinity clip applied to the predicted increment delta = u_tilde - u_t before accumulation.",
     )
+    parser.add_argument(
+        "--energy-accept-reject",
+        dest="energy_accept_reject",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-energy-accept-reject",
+        dest="energy_accept_reject",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(energy_accept_reject=False)
+    parser.add_argument(
+        "--energy-reject-factor",
+        type=float,
+        default=1.10,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--energy-reject-margin",
+        type=float,
+        default=1e-6,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--energy-fallback-mode",
+        type=str,
+        default="prev_delta",
+        choices=["prev_delta", "zero"],
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs/eval")
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
 
     # Must match training architecture.
@@ -70,8 +92,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-modes-x", type=int, default=16)
     parser.add_argument("--fno-modes-y", type=int, default=16)
     parser.add_argument("--disable-fno-grid", action="store_true")
+    parser.add_argument("--energy-layers", type=int, default=4, help=argparse.SUPPRESS)
+    parser.add_argument("--energy-head-type", type=str, default="local", choices=["local", "fno"], help=argparse.SUPPRESS)
+    parser.add_argument("--energy-fno-modes-x", type=int, default=16, help=argparse.SUPPRESS)
+    parser.add_argument("--energy-fno-modes-y", type=int, default=16, help=argparse.SUPPRESS)
     parser.add_argument("--use-dt-channel", action="store_true")
     parser.add_argument("--disable-forcing-channel", action="store_true")
+    parser.add_argument("--disable-z-grad-feature", action="store_true")
     parser.add_argument("--disable-u-grad-feature", action="store_true")
     return parser.parse_args()
 
@@ -109,6 +136,26 @@ def _parse_snapshot_times(raw: str, t_start: float, t_end: float) -> List[float]
     return vals
 
 
+def _remap_checkpoint_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Map legacy local energy-head parameter names to the current ones.
+
+    Older checkpoints stored the local-only energy head as
+    ``energy_head.backbone`` / ``energy_head.density_head``.  The current
+    implementation names those submodules ``local_backbone`` and
+    ``local_density_head`` after adding the optional FNO branch.
+    """
+
+    remapped: Dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        new_key = key
+        if key.startswith("energy_head.backbone."):
+            new_key = key.replace("energy_head.backbone.", "energy_head.local_backbone.", 1)
+        elif key.startswith("energy_head.density_head."):
+            new_key = key.replace("energy_head.density_head.", "energy_head.local_density_head.", 1)
+        remapped[new_key] = value
+    return remapped
+
+
 def _load_checkpoint(checkpoint_path: str, map_location: str | torch.device) -> Dict[str, object]:
     """Load checkpoints across PyTorch versions, including legacy tar saves.
 
@@ -127,11 +174,17 @@ def _load_checkpoint(checkpoint_path: str, map_location: str | torch.device) -> 
         return torch.load(checkpoint_path, map_location=map_location, weights_only=False)
 
 
-def _checkpoint_state_for_model(model: LatentMarkovModel2D, checkpoint_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    return {k: v for k, v in checkpoint_state.items() if not k.startswith("energy_head.")}
+def _checkpoint_state_for_model(
+    model: HiddenGradientFlowModel2D,
+    checkpoint_state: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    state = _remap_checkpoint_state_dict(checkpoint_state)
+    if not model.has_energy_head:
+        state = {k: v for k, v in state.items() if not k.startswith("energy_head.")}
+    return state
 
 
-def _build_model(n_x: int, n_y: int, h_x: float, h_y: float, dt: float, args: argparse.Namespace) -> LatentMarkovModel2D:
+def _build_model(n_x: int, n_y: int, h_x: float, h_y: float, dt: float, args: argparse.Namespace) -> HiddenGradientFlowModel2D:
     boundary_condition = "periodic"
     use_forcing_channel = not args.disable_forcing_channel
     encoder = StateEncoder2D(
@@ -180,24 +233,32 @@ def _build_model(n_x: int, n_y: int, h_x: float, h_y: float, dt: float, args: ar
         )
     else:
         raise ValueError(f"Unsupported prox-simulator-type: {args.prox_simulator_type}")
-    return LatentMarkovModel2D(
+    return HiddenGradientFlowModel2D(
         encoder=encoder,
         decoder=decoder,
-        transition=prox_step,
+        prox_step=prox_step,
+        energy_head=None,
     )
 
 
 @torch.no_grad()
 def _rollout(
-    model: LatentMarkovModel2D,
+    model: HiddenGradientFlowModel2D,
     u0: torch.Tensor,
     f: torch.Tensor,
     n_steps: int,
     dt: float,
     delta_clip: float = 10.0,
-) -> torch.Tensor:
+    energy_accept_reject: bool = True,
+    energy_reject_factor: float = 1.10,
+    energy_reject_margin: float = 1e-6,
+    energy_fallback_mode: str = "prev_delta",
+    return_stats: bool = False,
+) -> torch.Tensor | Dict[str, torch.Tensor]:
     states = [u0]
     u = u0
+    accept_hist = []
+    reject_hist = []
     for _ in range(n_steps):
         u_tilde = model.predict_step(u, f, dt=dt)
         delta = u_tilde - u
@@ -206,12 +267,22 @@ def _rollout(
         u = u + delta
         finite = torch.isfinite(u).flatten(1).all(dim=1)
         u = torch.where(finite[:, None, None], u, states[-1])
+        accept_mask = torch.ones(u.shape[0], dtype=torch.bool, device=u.device)
+        accept_hist.append(accept_mask)
+        reject_hist.append(~accept_mask)
         states.append(u)
-    return torch.stack(states, dim=1)
+    u_pred = torch.stack(states, dim=1)
+    if return_stats:
+        return {
+            "u_pred": u_pred,
+            "accept_mask": torch.stack(accept_hist, dim=1),
+            "reject_mask": torch.stack(reject_hist, dim=1),
+        }
+    return u_pred
 
 
 @torch.no_grad()
-def _evaluate_one_step_mse(model: LatentMarkovModel2D, split: Dict[str, torch.Tensor], device: str, dt: float) -> float:
+def _evaluate_one_step_mse(model: HiddenGradientFlowModel2D, split: Dict[str, torch.Tensor], device: str, dt: float) -> float:
     u_traj = split["u_traj"].to(device)
     f = split["f"].to(device)
     total_sq = 0.0
@@ -228,12 +299,16 @@ def _evaluate_one_step_mse(model: LatentMarkovModel2D, split: Dict[str, torch.Te
 
 @torch.no_grad()
 def _evaluate_rollout_rel_l2(
-    model: LatentMarkovModel2D,
+    model: HiddenGradientFlowModel2D,
     split: Dict[str, torch.Tensor],
     device: str,
     dt: float,
     area: float,
     delta_clip: float,
+    energy_accept_reject: bool,
+    energy_reject_factor: float,
+    energy_reject_margin: float,
+    energy_fallback_mode: str,
 ) -> float:
     u0 = split["u0"].to(device)
     f = split["f"].to(device)
@@ -246,6 +321,10 @@ def _evaluate_rollout_rel_l2(
         n_steps=n_steps,
         dt=dt,
         delta_clip=delta_clip,
+        energy_accept_reject=energy_accept_reject,
+        energy_reject_factor=energy_reject_factor,
+        energy_reject_margin=energy_reject_margin,
+        energy_fallback_mode=energy_fallback_mode,
     )
     diff = u_pred - u_ref
     num = torch.sqrt(area * torch.sum(diff * diff, dim=(-2, -1)))
@@ -256,12 +335,16 @@ def _evaluate_rollout_rel_l2(
 
 @torch.no_grad()
 def _evaluate_rollout_curves(
-    model: LatentMarkovModel2D,
+    model: HiddenGradientFlowModel2D,
     split: Dict[str, torch.Tensor],
     device: str,
     dt: float,
     area: float,
     delta_clip: float,
+    energy_accept_reject: bool,
+    energy_reject_factor: float,
+    energy_reject_margin: float,
+    energy_fallback_mode: str,
 ) -> Dict[str, np.ndarray]:
     u0 = split["u0"].to(device)
     f = split["f"].to(device)
@@ -275,6 +358,10 @@ def _evaluate_rollout_curves(
         n_steps=n_steps,
         dt=dt,
         delta_clip=delta_clip,
+        energy_accept_reject=energy_accept_reject,
+        energy_reject_factor=energy_reject_factor,
+        energy_reject_margin=energy_reject_margin,
+        energy_fallback_mode=energy_fallback_mode,
     )
     diff = u_pred - u_ref
     mse_per_sample = torch.mean(diff * diff, dim=(2, 3))  # (B, K+1)
@@ -367,7 +454,7 @@ def _plot_rollout_curves(
 
 @torch.no_grad()
 def _plot_test_samples(
-    model: LatentMarkovModel2D,
+    model: HiddenGradientFlowModel2D,
     split: Dict[str, torch.Tensor],
     device: str,
     dt: float,
@@ -376,6 +463,10 @@ def _plot_test_samples(
     n_plot_samples: int,
     out_dir: str,
     delta_clip: float,
+    energy_accept_reject: bool,
+    energy_reject_factor: float,
+    energy_reject_margin: float,
+    energy_fallback_mode: str,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -411,6 +502,10 @@ def _plot_test_samples(
             n_steps=n_steps,
             dt=dt,
             delta_clip=delta_clip,
+            energy_accept_reject=energy_accept_reject,
+            energy_reject_factor=energy_reject_factor,
+            energy_reject_margin=energy_reject_margin,
+            energy_fallback_mode=energy_fallback_mode,
         )[0].cpu()
         diff_i = u_pred_i - u_ref_i
         num_i = torch.sqrt(area * torch.sum(diff_i * diff_i, dim=(-2, -1)))
@@ -530,7 +625,6 @@ def _plot_test_samples(
 def main(args: argparse.Namespace) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
-    set_seed(args.seed, seed_cuda=(device == "cuda"))
     print(f"Device: {device}")
 
     splits = load_dataset_splits(args.dataset_path, map_location="cpu")
@@ -557,6 +651,7 @@ def main(args: argparse.Namespace) -> None:
     model.load_state_dict(_checkpoint_state_for_model(model, ckpt["model_state_dict"]), strict=True)
     model.eval()
     print(f"Loaded checkpoint: {args.checkpoint_path}")
+    print("Energy accept/reject: removed (deterministic rollout only)")
 
     step_mse = _evaluate_one_step_mse(model, split, device=device, dt=dt)
     rollout_rel = _evaluate_rollout_rel_l2(
@@ -566,6 +661,10 @@ def main(args: argparse.Namespace) -> None:
         dt=dt,
         area=area,
         delta_clip=args.delta_clip,
+        energy_accept_reject=args.energy_accept_reject,
+        energy_reject_factor=args.energy_reject_factor,
+        energy_reject_margin=args.energy_reject_margin,
+        energy_fallback_mode=args.energy_fallback_mode,
     )
     curves = _evaluate_rollout_curves(
         model,
@@ -574,6 +673,10 @@ def main(args: argparse.Namespace) -> None:
         dt=dt,
         area=area,
         delta_clip=args.delta_clip,
+        energy_accept_reject=args.energy_accept_reject,
+        energy_reject_factor=args.energy_reject_factor,
+        energy_reject_margin=args.energy_reject_margin,
+        energy_fallback_mode=args.energy_fallback_mode,
     )
     mse_curve_mean = curves["mse_curve_mean"]
     mse_curve_median = curves["mse_curve_median"]
@@ -620,6 +723,10 @@ def main(args: argparse.Namespace) -> None:
         n_plot_samples=args.n_plot_samples,
         out_dir=sample_dir,
         delta_clip=args.delta_clip,
+        energy_accept_reject=args.energy_accept_reject,
+        energy_reject_factor=args.energy_reject_factor,
+        energy_reject_margin=args.energy_reject_margin,
+        energy_fallback_mode=args.energy_fallback_mode,
     )
 
     summary = {
@@ -637,12 +744,12 @@ def main(args: argparse.Namespace) -> None:
         "step_mse": step_mse,
         "rollout_rel_l2": rollout_rel,
         "rollout_rel_l2_median": curves["rollout_rel_median"],
+        "energy_accept_reject": False,
         "mse_curve_mean": curves["mse_curve_mean"].tolist(),
         "mse_curve_median": curves["mse_curve_median"].tolist(),
         "rel_curve_mean": curves["rel_curve_mean"].tolist(),
         "rel_curve_median": curves["rel_curve_median"].tolist(),
         "snapshot_times": snapshot_times,
-        "seed": int(args.seed),
         "meta": meta,
     }
     with open(os.path.join(args.output_dir, f"{args.split}_summary.json"), "w", encoding="utf-8") as f:

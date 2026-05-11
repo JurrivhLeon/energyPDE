@@ -8,6 +8,7 @@ import argparse
 import csv
 import json
 import os
+import random
 from argparse import Namespace
 from typing import Dict, List
 
@@ -47,6 +48,20 @@ def _torch_load_checkpoint(checkpoint_path: str, map_location):
         return torch.load(checkpoint_path, map_location=map_location, weights_only=False)
 
 
+def set_seed(seed: int, seed_cuda: bool = False) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if seed_cuda:
+        torch.cuda.manual_seed_all(seed)
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate periodic 2D Navier-Stokes latent VAE checkpoint")
     parser.add_argument("--dataset-path", type=str, required=True)
@@ -57,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs_vae/eval")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--delta-clip",
         type=float,
@@ -73,18 +89,39 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _parse_snapshot_times(raw: str, t_final: float) -> List[float]:
+def _time_metadata(meta: Dict, n_steps: int) -> tuple[float, float, float, np.ndarray]:
+    t_start = float(meta.get("stored_t_start", meta.get("warmup_time", 0.0)))
+    if "record_dt" in meta:
+        dt = float(meta["record_dt"])
+    elif "stored_time_horizon" in meta:
+        dt = float(meta["stored_time_horizon"]) / float(n_steps)
+    else:
+        dt = float(meta.get("t_final", 1.0)) / float(n_steps)
+    if dt <= 0.0:
+        raise ValueError(f"Dataset record_dt/dt must be positive, got {dt}")
+
+    t_end = float(meta.get("stored_t_final", t_start + dt * float(n_steps)))
+    time_values = t_start + np.arange(n_steps + 1, dtype=np.float64) * dt
+    if abs(time_values[-1] - t_end) > max(1e-8, 1e-6 * max(1.0, abs(t_end))):
+        # Prefer the actual stored cadence for indexing; keep metadata visible in
+        # the summary so mismatches are easy to diagnose.
+        t_end = float(time_values[-1])
+    return dt, t_start, t_end, time_values
+
+
+def _parse_snapshot_times(raw: str, t_start: float, t_end: float) -> List[float]:
     vals = []
     for tok in raw.split(","):
         tok = tok.strip()
         if not tok:
             continue
         v = float(tok)
-        if v < 0.0 or v > float(t_final):
-            raise ValueError(f"Snapshot time must be in [0,{t_final}], got {v}")
+        if v < float(t_start) or v > float(t_end):
+            raise ValueError(f"Snapshot time must be in [{t_start},{t_end}], got {v}")
         vals.append(v)
     if not vals:
-        vals = [0.2 * t_final, 0.4 * t_final, 0.6 * t_final, 0.8 * t_final, t_final]
+        horizon = float(t_end) - float(t_start)
+        vals = [t_start + frac * horizon for frac in (0.2, 0.4, 0.6, 0.8, 1.0)]
     return vals
 
 
@@ -136,7 +173,7 @@ def _evaluate_rollout_curves(
     }
 
 
-def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], dt: float, out_path: str) -> None:
+def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -145,7 +182,7 @@ def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], dt: float, out_path: 
             writer.writerow(
                 [
                     k,
-                    f"{k * dt:.8f}",
+                    f"{float(time_values[k]):.8f}",
                     f"{float(curves['mse_curve_mean'][k]):.12e}",
                     f"{float(curves['mse_curve_median'][k]):.12e}",
                     f"{float(curves['rel_curve_mean'][k]):.12e}",
@@ -155,14 +192,14 @@ def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], dt: float, out_path: 
     print(f"Saved rollout curve csv: {out_path}")
 
 
-def _plot_rollout_curves(curves: Dict[str, np.ndarray], dt: float, out_path: str) -> None:
+def _plot_rollout_curves(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(f"Skipping curve plotting because matplotlib is unavailable: {exc}")
         return
 
-    t = np.arange(curves["mse_curve_mean"].shape[0], dtype=np.float64) * float(dt)
+    t = time_values[: curves["mse_curve_mean"].shape[0]]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), squeeze=False)
     ax1, ax2 = axes[0, 0], axes[0, 1]
 
@@ -195,7 +232,7 @@ def _plot_sample_trajectories(
     split: Dict[str, torch.Tensor],
     device: str,
     dt: float,
-    t_final: float,
+    time_values: np.ndarray,
     area: float,
     snapshot_times: List[float],
     n_plot_samples: int,
@@ -257,8 +294,9 @@ def _plot_sample_trajectories(
         im_ref_last = im_force
         im_err_last = None
         for j, t_snap in enumerate(snapshot_times, start=1):
-            k = int(round((float(t_snap) / float(t_final)) * n_steps)) if t_final > 0 else 0
+            k = int(np.argmin(np.abs(time_values - float(t_snap))))
             k = max(0, min(n_steps, k))
+            t_label = float(time_values[k])
 
             u_ref_k = u_ref_i[k]
             u_pred_k = u_pred_i[k]
@@ -273,7 +311,7 @@ def _plot_sample_trajectories(
                 vmax=state_scale,
                 extent=[0.0, 1.0, 0.0, 1.0],
             )
-            axes[0, j].set_title(f"ref t={t_snap:g}")
+            axes[0, j].set_title(f"ref t={t_label:g}")
             axes[0, j].set_xticks([])
             axes[0, j].set_yticks([])
 
@@ -285,7 +323,7 @@ def _plot_sample_trajectories(
                 vmax=state_scale,
                 extent=[0.0, 1.0, 0.0, 1.0],
             )
-            axes[1, j].set_title(f"pred t={t_snap:g}")
+            axes[1, j].set_title(f"pred t={t_label:g}")
             axes[1, j].set_xticks([])
             axes[1, j].set_yticks([])
 
@@ -295,7 +333,7 @@ def _plot_sample_trajectories(
                 cmap="magma",
                 extent=[0.0, 1.0, 0.0, 1.0],
             )
-            axes[2, j].set_title(f"|err| t={t_snap:g}\nrelL2={rel_k:.3e}")
+            axes[2, j].set_title(f"|err| t={t_label:g}\nrelL2={rel_k:.3e}")
             axes[2, j].set_xticks([])
             axes[2, j].set_yticks([])
             im_ref_last = im_ref
@@ -324,6 +362,7 @@ def _plot_sample_trajectories(
 def main(args: argparse.Namespace) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+    set_seed(args.seed, seed_cuda=(device == "cuda"))
     if not os.path.exists(args.dataset_path):
         raise FileNotFoundError(f"Dataset not found: {args.dataset_path}")
     if not os.path.exists(args.checkpoint):
@@ -342,12 +381,11 @@ def main(args: argparse.Namespace) -> None:
     n_x = int(split["u0"].shape[1])
     n_y = int(split["u0"].shape[2])
     n_steps = int(split["u_traj"].shape[1] - 1)
-    t_final = float(meta.get("t_final", 1.0))
-    dt = t_final / float(n_steps)
+    dt, t_start, t_final, time_values = _time_metadata(meta, n_steps=n_steps)
     h_x = 1.0 / float(n_x)
     h_y = 1.0 / float(n_y)
     area = h_x * h_y
-    snapshot_times = _parse_snapshot_times(args.snapshot_times, t_final=t_final)
+    snapshot_times = _parse_snapshot_times(args.snapshot_times, t_start=t_start, t_end=t_final)
 
     model = _build_model(n_x=n_x, n_y=n_y, dt=dt, args=train_args).to(device)
     checkpoint = _torch_load_checkpoint(args.checkpoint, map_location=device)
@@ -358,12 +396,14 @@ def main(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
     )
     traj_loader = DataLoader(
         build_navier_stokes2d_periodic_trajectory_dataset_from_split(split),
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        worker_init_fn=seed_worker,
     )
     trainer = PeriodicLatentVAETrainer2D(
         model=model,
@@ -395,22 +435,25 @@ def main(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
     print(f"Dataset: {args.dataset_path}")
     print(f"Checkpoint: {args.checkpoint}")
-    print(f"Split: {args.split}, n={int(split['u0'].shape[0])}, grid=({n_x},{n_y}), steps={n_steps}, dt={dt:.6f}")
+    print(
+        f"Split: {args.split}, n={int(split['u0'].shape[0])}, grid=({n_x},{n_y}), "
+        f"steps={n_steps}, dt={dt:.6f}, stored_time=[{t_start:.6f},{t_final:.6f}]"
+    )
     print(f"Delta clip: {args.delta_clip:.6f}")
     print(f"State clip: {args.state_clip:.6f}")
     print("Metrics:", metrics)
     print("Rollout accumulation by step (step, time, mse_mean, mse_median, rel_l2_mean, rel_l2_median):")
     for k in range(len(curves["mse_curve_mean"])):
         print(
-            f"  {k:03d}  {k * dt:8.4f}  "
+            f"  {k:03d}  {float(time_values[k]):8.4f}  "
             f"{curves['mse_curve_mean'][k]:.8e}  {curves['mse_curve_median'][k]:.8e}  "
             f"{curves['rel_curve_mean'][k]:.8e}  {curves['rel_curve_median'][k]:.8e}"
         )
 
     curve_csv = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.csv")
     curve_png = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png")
-    _save_rollout_curve_csv(curves, dt=dt, out_path=curve_csv)
-    _plot_rollout_curves(curves, dt=dt, out_path=curve_png)
+    _save_rollout_curve_csv(curves, time_values=time_values, out_path=curve_csv)
+    _plot_rollout_curves(curves, time_values=time_values, out_path=curve_png)
 
     sample_dir = os.path.join(args.output_dir, f"{args.split}_sample_comparisons")
     _plot_sample_trajectories(
@@ -418,7 +461,7 @@ def main(args: argparse.Namespace) -> None:
         split=split,
         device=device,
         dt=dt,
-        t_final=t_final,
+        time_values=time_values,
         area=area,
         snapshot_times=snapshot_times,
         n_plot_samples=args.n_plot_samples,
@@ -435,7 +478,9 @@ def main(args: argparse.Namespace) -> None:
         "n_y": n_y,
         "n_steps": n_steps,
         "dt": dt,
+        "t_start": t_start,
         "t_final": t_final,
+        "time_values": time_values.tolist(),
         "metrics": metrics,
         "rollout_rel_l2": curves["rollout_rel_mean"],
         "rollout_rel_l2_median": curves["rollout_rel_median"],
@@ -447,6 +492,7 @@ def main(args: argparse.Namespace) -> None:
         "deterministic_dynamics": True,
         "delta_clip": float(args.delta_clip),
         "state_clip": float(args.state_clip),
+        "seed": int(args.seed),
         "meta": meta,
     }
     summary_path = os.path.join(args.output_dir, f"{args.split}_summary.json")

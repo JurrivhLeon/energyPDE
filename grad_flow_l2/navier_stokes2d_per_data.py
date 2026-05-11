@@ -229,31 +229,52 @@ def sample_periodic_sinusoidal_2d(
     n_y: int,
     n_samples: int = 1,
     max_modes: int = 6,
-    amplitude: float = 1.0,
+    n_terms_range: tuple[int, int] = (4, 8),
+    amplitude: float = 0.2,
     device: str = "cpu",
 ) -> torch.Tensor:
     """
-    Random periodic sinusoidal fields on the torus.
+    Random periodic fields from sparse, damped mixed Fourier cosine modes.
+
+    The field is
+        sum_{m,n} a_{m,n} cos(2 pi (m x + n y) + phi_{m,n}),
+    using a small random subset of modes in [-max_modes, max_modes]^2
+    excluding (0, 0). Coefficients are sampled as
+        a_{m,n} ~ Uniform(-amplitude, amplitude) / (m^2 + n^2).
     """
     if max_modes < 1:
         raise ValueError("max_modes must be >= 1")
+    if n_terms_range[0] < 1 or n_terms_range[1] < 1:
+        raise ValueError("n_terms_range values must be >= 1")
+    if n_terms_range[0] > n_terms_range[1]:
+        raise ValueError("n_terms_range must satisfy min <= max")
+    if amplitude <= 0.0:
+        raise ValueError("amplitude must be > 0")
 
     xx, yy = _periodic_grid_2d(n_x=n_x, n_y=n_y, device=device)
     fields = torch.zeros(n_samples, n_x, n_y, device=device)
-    n_terms = max(3, max_modes)
-    for _ in range(n_terms):
-        k_x = torch.randint(1, max_modes + 1, (n_samples, 1, 1), device=device).float()
-        k_y = torch.randint(1, max_modes + 1, (n_samples, 1, 1), device=device).float()
-        ph_x = 2.0 * np.pi * torch.rand(n_samples, 1, 1, device=device)
-        ph_y = 2.0 * np.pi * torch.rand(n_samples, 1, 1, device=device)
-        coeff = torch.randn(n_samples, 1, 1, device=device) / (k_x + k_y)
-        fields = fields + coeff * torch.sin(2.0 * np.pi * k_x * xx.unsqueeze(0) + ph_x) * torch.sin(
-            2.0 * np.pi * k_y * yy.unsqueeze(0) + ph_y
-        )
+    modes = [
+        (m, n)
+        for m in range(-int(max_modes), int(max_modes) + 1)
+        for n in range(-int(max_modes), int(max_modes) + 1)
+        if not (m == 0 and n == 0)
+    ]
+    xx_b = xx.unsqueeze(0)
+    yy_b = yy.unsqueeze(0)
+    min_terms = int(n_terms_range[0])
+    max_terms = min(int(n_terms_range[1]), len(modes))
+    for sample_idx in range(n_samples):
+        n_terms = int(np.random.randint(min_terms, max_terms + 1))
+        mode_ids = np.random.choice(len(modes), size=n_terms, replace=False)
+        for mode_id in mode_ids:
+            m, n = modes[int(mode_id)]
+            radius_sq = float(m * m + n * n)
+            coeff = (2.0 * torch.rand((), device=device) - 1.0) * float(amplitude) / radius_sq
+            phase = 2.0 * np.pi * torch.rand((), device=device)
+            angle = 2.0 * np.pi * (float(m) * xx_b[0] + float(n) * yy_b[0]) + phase
+            fields[sample_idx] = fields[sample_idx] + coeff * torch.cos(angle)
 
     fields = project_zero_mean_2d(fields)
-    max_val = fields.abs().amax(dim=(1, 2), keepdim=True) + 1e-8
-    fields = float(amplitude) * fields / max_val
     return fields
 
 
@@ -261,12 +282,13 @@ def sample_periodic_field_mixed_2d(
     n_x: int,
     n_y: int,
     n_samples: int = 1,
-    amplitude: float = 1.0,
-    sinusoidal_amplitude_range: tuple[float, float] = (0.05, 0.5),
+    grf_amplitude: float = 0.25,
+    sinusoidal_amplitude: float = 0.5,
+    sinusoidal_terms_range: tuple[int, int] = (4, 8),
     length_scale_range: tuple[float, float] = (0.05, 0.30),
     max_modes: int = 3,
-    grf_prob: float = 0.55,
-    matern_prob: float = 0.35,
+    grf_prob: float = 0.80,
+    matern_prob: float = 0.00,
     matern_length_scale_range: tuple[float, float] = (0.25, 0.80),
     allow_sinusoidal: bool = True,
     show_progress: bool = False,
@@ -288,14 +310,18 @@ def sample_periodic_field_mixed_2d(
         raise ValueError("length_scale_range values must be > 0")
     if matern_length_scale_range[0] <= 0 or matern_length_scale_range[1] <= 0:
         raise ValueError("matern_length_scale_range values must be > 0")
-    if sinusoidal_amplitude_range[0] <= 0 or sinusoidal_amplitude_range[1] <= 0:
-        raise ValueError("sinusoidal_amplitude_range values must be > 0")
+    if grf_amplitude <= 0.0:
+        raise ValueError("grf_amplitude must be > 0")
+    if sinusoidal_amplitude <= 0.0:
+        raise ValueError("sinusoidal_amplitude must be > 0")
+    if sinusoidal_terms_range[0] < 1 or sinusoidal_terms_range[1] < 1:
+        raise ValueError("sinusoidal_terms_range values must be >= 1")
+    if sinusoidal_terms_range[0] > sinusoidal_terms_range[1]:
+        raise ValueError("sinusoidal_terms_range must satisfy min <= max")
     if length_scale_range[0] >= length_scale_range[1]:
         raise ValueError("length_scale_range must satisfy min < max")
     if matern_length_scale_range[0] >= matern_length_scale_range[1]:
         raise ValueError("matern_length_scale_range must satisfy min < max")
-    if sinusoidal_amplitude_range[0] >= sinusoidal_amplitude_range[1]:
-        raise ValueError("sinusoidal_amplitude_range must satisfy min < max")
 
     out = []
     iterator = _iter_with_progress(
@@ -313,14 +339,14 @@ def sample_periodic_field_mixed_2d(
             elif r < grf_prob + matern_prob:
                 choose_grf = False
             else:
-                mm = int(np.random.randint(3, max_modes + 1))
-                sinusoidal_amp = float(np.random.uniform(*sinusoidal_amplitude_range))
+                mm = int(max_modes)
                 field = sample_periodic_sinusoidal_2d(
                     n_x=n_x,
                     n_y=n_y,
                     n_samples=1,
                     max_modes=mm,
-                    amplitude=sinusoidal_amp,
+                    n_terms_range=sinusoidal_terms_range,
+                    amplitude=sinusoidal_amplitude,
                     device=device,
                 )
                 choose_grf = None
@@ -373,24 +399,32 @@ def sample_periodic_field_mixed_2d(
         field = project_zero_mean_2d(field)
         if not is_sinusoidal:
             # Keep the sampled fields mostly within the target value range.
-            amp = float(amplitude * (10.0 ** np.random.uniform(-0.15, 0.15)))
+            amp = float(grf_amplitude * (10.0 ** np.random.uniform(-0.15, 0.15)))
             field = amp * field / (field.abs().amax(dim=(1, 2), keepdim=True) + 1e-8)
         out.append(field)
     return torch.cat(out, dim=0)
 
 
-def _rescale_batch_l2_2d(
+def _cap_batch_linf_pair_2d(
     x: torch.Tensor,
-    area: float,
-    norm_min: float,
-    norm_max: float,
-) -> torch.Tensor:
+    y: torch.Tensor,
+    max_abs: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     if x.dim() != 3:
         raise ValueError("x must have shape (batch, n_x, n_y)")
-    norms = torch.sqrt(float(area) * torch.sum(x * x, dim=(1, 2)))
-    targets = torch.empty_like(norms).uniform_(norm_min, norm_max)
-    scale = targets / (norms + 1e-8)
-    return x * scale.view(-1, 1, 1)
+    if y.dim() != 3:
+        raise ValueError("y must have shape (batch, n_x, n_y)")
+    if x.shape[0] != y.shape[0]:
+        raise ValueError("x and y must have matching batch size")
+    if max_abs <= 0.0:
+        raise ValueError("max_abs must be > 0")
+    x_abs = x.abs().amax(dim=(1, 2))
+    y_abs = y.abs().amax(dim=(1, 2)).to(device=x.device, dtype=x.dtype)
+    current = torch.maximum(x_abs, y_abs)
+    scale = torch.clamp(float(max_abs) / (current + 1e-8), max=1.0)
+    x_scaled = x * scale.view(-1, 1, 1)
+    y_scaled = y * scale.to(device=y.device, dtype=y.dtype).view(-1, 1, 1)
+    return x_scaled, y_scaled
 
 
 def _slice_split(data: Dict[str, torch.Tensor], start: int, end: int) -> Dict[str, torch.Tensor]:
@@ -411,27 +445,27 @@ def generate_navier_stokes2d_periodic_dataset_splits(
     n_test: int,
     nu: float = 0.001,
     seed: int = 42,
-    solver_n_x: int = 64,
-    solver_n_y: int = 64,
-    solver_dt: float = 1e-3,
+    solver_n_x: int = 256,
+    solver_n_y: int = 256,
+    solver_dt: float = 1e-4,
     record_dt: float = 1.0,
+    warmup_time: float = 0.0,
     u0_spectrum_scale: float = 8.0 ** 1.5,
     u0_spectrum_shift: float = 4.0,
     u0_spectrum_power: float = 2.5,
     u0_rescale: float = 10.0,
     forcing_mode: str = "mixed",
-    f_amplitude: float = 0.45,
-    f_sinusoidal_amplitude_min: float = 0.05,
-    f_sinusoidal_amplitude_max: float = 0.5,
-    f_grf_prob: float = 0.7,
+    f_grf_amplitude: float = 0.25,
+    f_sinusoidal_amplitude: float = 0.50,
+    f_sinusoidal_terms_min: int = 4,
+    f_sinusoidal_terms_max: int = 8,
+    f_max_abs: float = 0.25,
+    f_grf_prob: float = 0.80,
     f_matern_prob: float = 0.0,
     f_length_scale_min: float = 0.05,
-    f_length_scale_max: float = 0.30,
-    f_max_modes: int = 3,
+    f_length_scale_max: float = 0.10,
+    f_max_modes: int = 4,
     f_allow_sinusoidal: bool = True,
-    norm_targeting: bool = False,
-    target_u0_norm_range: tuple[float, float] = (0.4, 1.0),
-    target_f_norm_range: tuple[float, float] = (0.1, 0.5),
     cfl_adv: float = 0.45,
     chunk_size: int = 256,
     show_progress: bool = False,
@@ -450,18 +484,35 @@ def generate_navier_stokes2d_periodic_dataset_splits(
         raise ValueError("solver grid must be at least as large as the output grid")
     if solver_dt <= 0 or record_dt <= 0:
         raise ValueError("solver_dt and record_dt must be > 0")
+    if warmup_time < 0.0:
+        raise ValueError("warmup_time must be >= 0")
+    if warmup_time >= t_final:
+        raise ValueError("warmup_time must be smaller than t_final")
+    warmup_records = int(round(float(warmup_time) / float(record_dt)))
+    if abs(float(warmup_time) - warmup_records * float(record_dt)) > 1e-10:
+        raise ValueError("warmup_time must be an integer multiple of record_dt")
     if u0_rescale <= 0:
         raise ValueError("u0_rescale must be > 0")
-    if f_sinusoidal_amplitude_min <= 0 or f_sinusoidal_amplitude_max <= 0:
-        raise ValueError("f_sinusoidal_amplitude_min/max must be > 0")
-    if f_sinusoidal_amplitude_min >= f_sinusoidal_amplitude_max:
-        raise ValueError("f_sinusoidal_amplitude_min must be < f_sinusoidal_amplitude_max")
-    expected_records = int(round(float(t_final) / float(record_dt)))
+    if f_grf_amplitude <= 0.0:
+        raise ValueError("f_grf_amplitude must be > 0")
+    if f_sinusoidal_amplitude <= 0.0:
+        raise ValueError("f_sinusoidal_amplitude must be > 0")
+    if f_sinusoidal_terms_min < 1 or f_sinusoidal_terms_max < 1:
+        raise ValueError("f_sinusoidal_terms_min/max must be >= 1")
+    if f_sinusoidal_terms_min > f_sinusoidal_terms_max:
+        raise ValueError("f_sinusoidal_terms_min must be <= f_sinusoidal_terms_max")
+    if f_max_abs <= 0.0:
+        raise ValueError("f_max_abs must be > 0")
+    stored_time_horizon = float(t_final) - float(warmup_time)
+    expected_records = int(round(stored_time_horizon / float(record_dt)))
     if expected_records != int(n_steps):
         raise ValueError(
             "n_steps must match the number of recorded intervals: "
-            f"expected {expected_records} from t_final/record_dt, got {n_steps}"
+            f"expected {expected_records} from (t_final-warmup_time)/record_dt, got {n_steps}"
         )
+    total_records = int(round(float(t_final) / float(record_dt)))
+    if abs(float(t_final) - total_records * float(record_dt)) > 1e-10:
+        raise ValueError("t_final must be an integer multiple of record_dt")
 
     rng_state_torch = torch.random.get_rng_state()
     rng_state_numpy = np.random.get_state()
@@ -500,8 +551,9 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             n_x=solver_n_x,
             n_y=solver_n_y,
             n_samples=total,
-            amplitude=f_amplitude,
-            sinusoidal_amplitude_range=(f_sinusoidal_amplitude_min, f_sinusoidal_amplitude_max),
+            grf_amplitude=f_grf_amplitude,
+            sinusoidal_amplitude=f_sinusoidal_amplitude,
+            sinusoidal_terms_range=(f_sinusoidal_terms_min, f_sinusoidal_terms_max),
             length_scale_range=(f_length_scale_min, f_length_scale_max),
             max_modes=f_max_modes,
             grf_prob=f_grf_prob,
@@ -513,6 +565,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
         ).to(dtype=torch.float64)
         f = spectral_truncate_periodic_field_2d(f_hr, target_n_x=n_x, target_n_y=n_y).to(dtype=dtype)
         f = project_zero_mean_2d(f)
+        f_hr, f = _cap_batch_linf_pair_2d(f_hr, f, max_abs=f_max_abs)
 
     u_traj_chunks = []
     chunk_starts = range(0, total, int(chunk_size))
@@ -539,13 +592,15 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             target_n_x=n_x,
             target_n_y=n_y,
         ).to(dtype=dtype)
-        u_traj_chunk = u_traj_chunk.reshape(end - start, n_steps + 1, n_x, n_y)
+        u_traj_chunk = u_traj_chunk.reshape(end - start, total_records + 1, n_x, n_y)
+        u_traj_chunk = u_traj_chunk[:, warmup_records : warmup_records + n_steps + 1]
         u_traj_chunks.append(u_traj_chunk)
     u_traj = torch.cat(u_traj_chunks, dim=0)
+    u0_stored = u_traj[:, 0].clone()
 
     all_data = {
         "f": f.cpu(),
-        "u0": u0.cpu(),
+        "u0": u0_stored.cpu(),
         "u_traj": u_traj.cpu(),
     }
     train_end = int(n_train)
@@ -569,6 +624,10 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             "solver_n_y": int(solver_n_y),
             "n_steps": int(n_steps),
             "t_final": float(t_final),
+            "warmup_time": float(warmup_time),
+            "stored_t_start": float(warmup_time),
+            "stored_t_final": float(t_final),
+            "stored_time_horizon": float(stored_time_horizon),
             "solver_dt": float(solver_dt),
             "record_dt": float(record_dt),
             "n_train": int(n_train),
@@ -583,18 +642,17 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             "u0_spectrum_shift": float(u0_spectrum_shift),
             "u0_spectrum_power": float(u0_spectrum_power),
             "u0_rescale": float(u0_rescale),
-            "f_amplitude": float(f_amplitude),
-            "f_sinusoidal_amplitude_min": float(f_sinusoidal_amplitude_min),
-            "f_sinusoidal_amplitude_max": float(f_sinusoidal_amplitude_max),
+            "f_grf_amplitude": float(f_grf_amplitude),
+            "f_sinusoidal_amplitude": float(f_sinusoidal_amplitude),
+            "f_sinusoidal_terms_min": int(f_sinusoidal_terms_min),
+            "f_sinusoidal_terms_max": int(f_sinusoidal_terms_max),
+            "f_max_abs": float(f_max_abs),
             "f_grf_prob": float(f_grf_prob),
             "f_matern_prob": float(f_matern_prob),
             "f_length_scale_min": float(f_length_scale_min),
             "f_length_scale_max": float(f_length_scale_max),
             "f_max_modes": int(f_max_modes),
             "f_allow_sinusoidal": bool(f_allow_sinusoidal),
-            "norm_targeting": bool(norm_targeting),
-            "target_u0_norm_range": [float(target_u0_norm_range[0]), float(target_u0_norm_range[1])],
-            "target_f_norm_range": [float(target_f_norm_range[0]), float(target_f_norm_range[1])],
             "cfl_adv": float(cfl_adv),
             "chunk_size": int(chunk_size),
             "device": device,
@@ -617,10 +675,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nu", type=float, default=0.001, help="Viscosity coefficient")
     parser.add_argument("--solver-dt", type=float, default=1e-4, help="Time step used by the pseudospectral solver")
     parser.add_argument("--record-dt", type=float, default=1.0, help="Snapshot spacing used during data generation")
+    parser.add_argument("--warmup-time", type=float, default=0.0, help="Physical warm-up time to solve and discard before storing snapshots")
 
-    parser.add_argument("--n-train", type=int, default=1500)
-    parser.add_argument("--n-val", type=int, default=300)
-    parser.add_argument("--n-test", type=int, default=200)
+    parser.add_argument("--n-train", type=int, default=1600)
+    parser.add_argument("--n-val", type=int, default=400)
+    parser.add_argument("--n-test", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--u0-spectrum-scale", type=float, default=8.0 ** 1.5)
@@ -628,22 +687,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--u0-spectrum-power", type=float, default=2.5)
     parser.add_argument("--u0-rescale", type=float, default=10.0)
     parser.add_argument("--forcing-mode", type=str, default="mixed", choices=["zero", "mixed"])
-    parser.add_argument("--f-amplitude", type=float, default=0.45)
-    parser.add_argument("--f-sinusoidal-amplitude-min", type=float, default=0.05)
-    parser.add_argument("--f-sinusoidal-amplitude-max", type=float, default=0.5)
-    parser.add_argument("--f-grf-prob", type=float, default=0.7)
+    parser.add_argument("--f-grf-amplitude", type=float, default=0.25)
+    parser.add_argument("--f-sinusoidal-amplitude", type=float, default=0.50)
+    parser.add_argument("--f-sinusoidal-terms-min", type=int, default=2)
+    parser.add_argument("--f-sinusoidal-terms-max", type=int, default=6)
+    parser.add_argument(
+        "--f-max-abs",
+        type=float,
+        default=0.25,
+        help="Per-sample L-infinity cap for forcing. High-res solver forcing and stored forcing are scaled together.",
+    )
+    parser.add_argument("--f-grf-prob", type=float, default=0.80)
     parser.add_argument("--f-matern-prob", type=float, default=0.0)
     parser.add_argument("--f-length-scale-min", type=float, default=0.05)
-    parser.add_argument("--f-length-scale-max", type=float, default=0.30)
-    parser.add_argument("--f-max-modes", type=int, default=3)
+    parser.add_argument("--f-length-scale-max", type=float, default=0.15)
+    parser.add_argument("--f-max-modes", type=int, default=4)
     parser.add_argument("--f-allow-sinusoidal", dest="f_allow_sinusoidal", action="store_true", help="Allow sinusoidal forcing samples in the mixed prior")
     parser.add_argument("--f-no-sinusoidal", dest="f_allow_sinusoidal", action="store_false", help="Disable sinusoidal forcing samples in the mixed prior")
     parser.set_defaults(f_allow_sinusoidal=True)
-    parser.add_argument("--disable-norm-targeting", action="store_true")
-    parser.add_argument("--target-u0-norm-min", type=float, default=0.4)
-    parser.add_argument("--target-u0-norm-max", type=float, default=1.0)
-    parser.add_argument("--target-f-norm-min", type=float, default=0.1)
-    parser.add_argument("--target-f-norm-max", type=float, default=0.5)
     parser.add_argument("--cfl-adv", type=float, default=0.45)
     parser.add_argument("--chunk-size", type=int, default=256, help="Trajectory solver chunk size")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for sampling and solves, e.g. cpu or cuda:0")
@@ -652,7 +713,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-path",
         type=str,
-        default="grad_flow_l2/ns2d_per/datasets/navier_stokes2d_vorticity_periodic_lr64_nu0p001_nx64_ny64_steps10.pt",
+        default="grad_flow_l2/ns2d_per/datasets/ns2d_per_train2000_t10_dt1e-4.pt",
         help="Path to output dataset file (.pt)",
     )
     parser.add_argument(
@@ -821,23 +882,23 @@ def main(args: argparse.Namespace) -> None:
         solver_n_y=args.solver_n_y,
         solver_dt=args.solver_dt,
         record_dt=args.record_dt,
+        warmup_time=args.warmup_time,
         u0_spectrum_scale=args.u0_spectrum_scale,
         u0_spectrum_shift=args.u0_spectrum_shift,
         u0_spectrum_power=args.u0_spectrum_power,
         u0_rescale=args.u0_rescale,
         forcing_mode=args.forcing_mode,
-        f_amplitude=args.f_amplitude,
-        f_sinusoidal_amplitude_min=args.f_sinusoidal_amplitude_min,
-        f_sinusoidal_amplitude_max=args.f_sinusoidal_amplitude_max,
+        f_grf_amplitude=args.f_grf_amplitude,
+        f_sinusoidal_amplitude=args.f_sinusoidal_amplitude,
+        f_sinusoidal_terms_min=args.f_sinusoidal_terms_min,
+        f_sinusoidal_terms_max=args.f_sinusoidal_terms_max,
+        f_max_abs=args.f_max_abs,
         f_grf_prob=args.f_grf_prob,
         f_matern_prob=args.f_matern_prob,
         f_length_scale_min=args.f_length_scale_min,
         f_length_scale_max=args.f_length_scale_max,
         f_max_modes=args.f_max_modes,
         f_allow_sinusoidal=args.f_allow_sinusoidal,
-        norm_targeting=False,
-        target_u0_norm_range=(args.target_u0_norm_min, args.target_u0_norm_max),
-        target_f_norm_range=(args.target_f_norm_min, args.target_f_norm_max),
         cfl_adv=args.cfl_adv,
         chunk_size=args.chunk_size,
         show_progress=(not args.no_progress),
