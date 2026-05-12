@@ -228,9 +228,9 @@ def sample_periodic_sinusoidal_2d(
     n_x: int,
     n_y: int,
     n_samples: int = 1,
-    max_modes: int = 6,
+    max_modes: int = 3,
     n_terms_range: tuple[int, int] = (4, 8),
-    amplitude: float = 0.2,
+    target_linf_range: tuple[float, float] = (0.10, 0.20),
     device: str = "cpu",
 ) -> torch.Tensor:
     """
@@ -239,8 +239,10 @@ def sample_periodic_sinusoidal_2d(
     The field is
         sum_{m,n} a_{m,n} cos(2 pi (m x + n y) + phi_{m,n}),
     using a small random subset of modes in [-max_modes, max_modes]^2
-    excluding (0, 0). Coefficients are sampled as
-        a_{m,n} ~ Uniform(-amplitude, amplitude) / (m^2 + n^2).
+    with both m and n nonzero. Raw coefficients are damped as
+        a_{m,n} ~ Uniform(-1, 1) / (m^2 + n^2),
+    then each sample is normalized to a random L-infinity norm in
+    target_linf_range.
     """
     if max_modes < 1:
         raise ValueError("max_modes must be >= 1")
@@ -248,8 +250,10 @@ def sample_periodic_sinusoidal_2d(
         raise ValueError("n_terms_range values must be >= 1")
     if n_terms_range[0] > n_terms_range[1]:
         raise ValueError("n_terms_range must satisfy min <= max")
-    if amplitude <= 0.0:
-        raise ValueError("amplitude must be > 0")
+    if target_linf_range[0] <= 0.0 or target_linf_range[1] <= 0.0:
+        raise ValueError("target_linf_range values must be > 0")
+    if target_linf_range[0] > target_linf_range[1]:
+        raise ValueError("target_linf_range must satisfy min <= max")
 
     xx, yy = _periodic_grid_2d(n_x=n_x, n_y=n_y, device=device)
     fields = torch.zeros(n_samples, n_x, n_y, device=device)
@@ -257,7 +261,7 @@ def sample_periodic_sinusoidal_2d(
         (m, n)
         for m in range(-int(max_modes), int(max_modes) + 1)
         for n in range(-int(max_modes), int(max_modes) + 1)
-        if not (m == 0 and n == 0)
+        if not (m == 0 or n == 0)
     ]
     xx_b = xx.unsqueeze(0)
     yy_b = yy.unsqueeze(0)
@@ -269,12 +273,18 @@ def sample_periodic_sinusoidal_2d(
         for mode_id in mode_ids:
             m, n = modes[int(mode_id)]
             radius_sq = float(m * m + n * n)
-            coeff = (2.0 * torch.rand((), device=device) - 1.0) * float(amplitude) / radius_sq
+            coeff = (2.0 * torch.rand((), device=device) - 1.0) / radius_sq
             phase = 2.0 * np.pi * torch.rand((), device=device)
             angle = 2.0 * np.pi * (float(m) * xx_b[0] + float(n) * yy_b[0]) + phase
             fields[sample_idx] = fields[sample_idx] + coeff * torch.cos(angle)
 
     fields = project_zero_mean_2d(fields)
+    current = fields.abs().amax(dim=(1, 2), keepdim=True)
+    targets = torch.empty(n_samples, 1, 1, device=device).uniform_(
+        float(target_linf_range[0]),
+        float(target_linf_range[1]),
+    )
+    fields = targets * fields / (current + 1e-8)
     return fields
 
 
@@ -284,6 +294,7 @@ def sample_periodic_field_mixed_2d(
     n_samples: int = 1,
     grf_amplitude: float = 0.25,
     sinusoidal_amplitude: float = 0.5,
+    sinusoidal_linf_range: tuple[float, float] = (0.10, 0.20),
     sinusoidal_terms_range: tuple[int, int] = (4, 8),
     length_scale_range: tuple[float, float] = (0.05, 0.30),
     max_modes: int = 3,
@@ -314,6 +325,10 @@ def sample_periodic_field_mixed_2d(
         raise ValueError("grf_amplitude must be > 0")
     if sinusoidal_amplitude <= 0.0:
         raise ValueError("sinusoidal_amplitude must be > 0")
+    if sinusoidal_linf_range[0] <= 0.0 or sinusoidal_linf_range[1] <= 0.0:
+        raise ValueError("sinusoidal_linf_range values must be > 0")
+    if sinusoidal_linf_range[0] > sinusoidal_linf_range[1]:
+        raise ValueError("sinusoidal_linf_range must satisfy min <= max")
     if sinusoidal_terms_range[0] < 1 or sinusoidal_terms_range[1] < 1:
         raise ValueError("sinusoidal_terms_range values must be >= 1")
     if sinusoidal_terms_range[0] > sinusoidal_terms_range[1]:
@@ -346,7 +361,7 @@ def sample_periodic_field_mixed_2d(
                     n_samples=1,
                     max_modes=mm,
                     n_terms_range=sinusoidal_terms_range,
-                    amplitude=sinusoidal_amplitude,
+                    target_linf_range=sinusoidal_linf_range,
                     device=device,
                 )
                 choose_grf = None
@@ -457,6 +472,8 @@ def generate_navier_stokes2d_periodic_dataset_splits(
     forcing_mode: str = "mixed",
     f_grf_amplitude: float = 0.25,
     f_sinusoidal_amplitude: float = 0.50,
+    f_sinusoidal_linf_min: float = 0.10,
+    f_sinusoidal_linf_max: float = 0.20,
     f_sinusoidal_terms_min: int = 4,
     f_sinusoidal_terms_max: int = 8,
     f_max_abs: float = 0.25,
@@ -497,6 +514,10 @@ def generate_navier_stokes2d_periodic_dataset_splits(
         raise ValueError("f_grf_amplitude must be > 0")
     if f_sinusoidal_amplitude <= 0.0:
         raise ValueError("f_sinusoidal_amplitude must be > 0")
+    if f_sinusoidal_linf_min <= 0.0 or f_sinusoidal_linf_max <= 0.0:
+        raise ValueError("f_sinusoidal_linf_min/max must be > 0")
+    if f_sinusoidal_linf_min > f_sinusoidal_linf_max:
+        raise ValueError("f_sinusoidal_linf_min must be <= f_sinusoidal_linf_max")
     if f_sinusoidal_terms_min < 1 or f_sinusoidal_terms_max < 1:
         raise ValueError("f_sinusoidal_terms_min/max must be >= 1")
     if f_sinusoidal_terms_min > f_sinusoidal_terms_max:
@@ -553,6 +574,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             n_samples=total,
             grf_amplitude=f_grf_amplitude,
             sinusoidal_amplitude=f_sinusoidal_amplitude,
+            sinusoidal_linf_range=(f_sinusoidal_linf_min, f_sinusoidal_linf_max),
             sinusoidal_terms_range=(f_sinusoidal_terms_min, f_sinusoidal_terms_max),
             length_scale_range=(f_length_scale_min, f_length_scale_max),
             max_modes=f_max_modes,
@@ -644,6 +666,8 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             "u0_rescale": float(u0_rescale),
             "f_grf_amplitude": float(f_grf_amplitude),
             "f_sinusoidal_amplitude": float(f_sinusoidal_amplitude),
+            "f_sinusoidal_linf_min": float(f_sinusoidal_linf_min),
+            "f_sinusoidal_linf_max": float(f_sinusoidal_linf_max),
             "f_sinusoidal_terms_min": int(f_sinusoidal_terms_min),
             "f_sinusoidal_terms_max": int(f_sinusoidal_terms_max),
             "f_max_abs": float(f_max_abs),
@@ -688,7 +712,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--u0-rescale", type=float, default=10.0)
     parser.add_argument("--forcing-mode", type=str, default="mixed", choices=["zero", "mixed"])
     parser.add_argument("--f-grf-amplitude", type=float, default=0.25)
-    parser.add_argument("--f-sinusoidal-amplitude", type=float, default=0.50)
+    parser.add_argument(
+        "--f-sinusoidal-amplitude",
+        type=float,
+        default=0.50,
+        help="Deprecated compatibility flag; sinusoidal fields are now controlled by --f-sinusoidal-linf-min/max.",
+    )
+    parser.add_argument("--f-sinusoidal-linf-min", type=float, default=0.10)
+    parser.add_argument("--f-sinusoidal-linf-max", type=float, default=0.20)
     parser.add_argument("--f-sinusoidal-terms-min", type=int, default=2)
     parser.add_argument("--f-sinusoidal-terms-max", type=int, default=6)
     parser.add_argument(
@@ -701,7 +732,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--f-matern-prob", type=float, default=0.0)
     parser.add_argument("--f-length-scale-min", type=float, default=0.05)
     parser.add_argument("--f-length-scale-max", type=float, default=0.15)
-    parser.add_argument("--f-max-modes", type=int, default=4)
+    parser.add_argument("--f-max-modes", type=int, default=3)
     parser.add_argument("--f-allow-sinusoidal", dest="f_allow_sinusoidal", action="store_true", help="Allow sinusoidal forcing samples in the mixed prior")
     parser.add_argument("--f-no-sinusoidal", dest="f_allow_sinusoidal", action="store_false", help="Disable sinusoidal forcing samples in the mixed prior")
     parser.set_defaults(f_allow_sinusoidal=True)
@@ -890,6 +921,8 @@ def main(args: argparse.Namespace) -> None:
         forcing_mode=args.forcing_mode,
         f_grf_amplitude=args.f_grf_amplitude,
         f_sinusoidal_amplitude=args.f_sinusoidal_amplitude,
+        f_sinusoidal_linf_min=args.f_sinusoidal_linf_min,
+        f_sinusoidal_linf_max=args.f_sinusoidal_linf_max,
         f_sinusoidal_terms_min=args.f_sinusoidal_terms_min,
         f_sinusoidal_terms_max=args.f_sinusoidal_terms_max,
         f_max_abs=args.f_max_abs,

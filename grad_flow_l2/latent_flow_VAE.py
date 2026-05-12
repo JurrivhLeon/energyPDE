@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .grad_flow2d import (
+from .latent_markov import (
     FNOBlock2D,
     ResidualConvBlock2D,
     StateDecoder2D,
