@@ -24,7 +24,6 @@ except Exception:
     tqdm = None
 
 try:
-    from ..grad_flow2d import StateDecoder2D
     from ..heat_data import load_dataset_splits
     from ..latent_flow_VAE import (
         FNOLatentTransition2D,
@@ -32,13 +31,13 @@ try:
         TransitionAmplitudeHead2D,
         VariationalStateEncoder2D,
     )
-    from ..navier_stokes2d.trainer import relative_l2_error_2d
+    from ..latent_markov import StateDecoder2D
+    from ..latent_markov_trainer import relative_l2_error_2d
     from ..navier_stokes2d_per_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
 except ImportError:
-    from grad_flow_l2.grad_flow2d import StateDecoder2D
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.latent_flow_VAE import (
         FNOLatentTransition2D,
@@ -46,7 +45,8 @@ except ImportError:
         TransitionAmplitudeHead2D,
         VariationalStateEncoder2D,
     )
-    from grad_flow_l2.navier_stokes2d.trainer import relative_l2_error_2d
+    from grad_flow_l2.latent_markov import StateDecoder2D
+    from grad_flow_l2.latent_markov_trainer import relative_l2_error_2d
     from grad_flow_l2.navier_stokes2d_per_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
