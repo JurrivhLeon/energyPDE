@@ -99,6 +99,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-gamma", type=float, default=0.5, help="Multiplicative LR decay for StepLR.")
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--rollout-delta-clip",
+        type=float,
+        default=10.0,
+        help="L-infinity clip for rollout increments during validation. Use <=0 to disable.",
+    )
     parser.add_argument("--lambda-recon", type=float, default=1.0)
     parser.add_argument("--lambda-spec", type=float, default=1.0)
     parser.add_argument("--spectral-s", type=float, default=1.0)
@@ -280,6 +286,7 @@ def main(args: argparse.Namespace) -> None:
         lr_gamma=args.lr_gamma,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
+        rollout_delta_clip=args.rollout_delta_clip,
         device=device,
         output_dir=run_dir,
         show_epoch_pbar=not args.no_epoch_pbar,
@@ -296,6 +303,7 @@ def main(args: argparse.Namespace) -> None:
         f"Training config: epochs={args.epochs}, lr={args.lr}, "
         f"lr_step_size={args.lr_step_size}, lr_gamma={args.lr_gamma}, "
         f"lambda_recon={args.lambda_recon}, lambda_spec={args.lambda_spec}, spectral_s={args.spectral_s}, "
+        f"rollout_delta_clip={args.rollout_delta_clip}, "
         f"prox_type={args.prox_simulator_type}, "
         f"fno_modes=({args.fno_modes_x},{args.fno_modes_y}), "
         f"epoch_pbar={not args.no_epoch_pbar}, "

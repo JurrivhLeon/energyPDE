@@ -24,6 +24,7 @@ try:
         StateDecoder2D,
         StateEncoder2D,
     )
+    from ..latent_markov_trainer import relative_spectral_hs_error_2d
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.latent_markov import (
@@ -33,6 +34,7 @@ except ImportError:
         StateDecoder2D,
         StateEncoder2D,
     )
+    from grad_flow_l2.latent_markov_trainer import relative_spectral_hs_error_2d
 
 
 def set_seed(seed: int, seed_cuda: bool = False) -> None:
@@ -277,58 +279,69 @@ def _evaluate_rollout_curves(
         delta_clip=delta_clip,
     )
     diff = u_pred - u_ref
-    mse_per_sample = torch.mean(diff * diff, dim=(2, 3))  # (B, K+1)
-    mse_curve_mean = torch.nanmean(mse_per_sample, dim=0).cpu().numpy()
-    mse_curve_median = np.nanmedian(mse_per_sample.cpu().numpy(), axis=0)
-
     num = torch.sqrt(area * torch.sum(diff * diff, dim=(-2, -1)))
     den = torch.sqrt(area * torch.sum(u_ref * u_ref, dim=(-2, -1)))
     rel = num / (den + 1e-8)
     rel_curve_mean = torch.nanmean(rel, dim=0).cpu().numpy()
     rel_curve_median = np.nanmedian(rel.cpu().numpy(), axis=0)
     rel_per_sample_mean = torch.nanmean(rel, dim=1).cpu().numpy()
+    rel_h1 = relative_spectral_hs_error_2d(u_pred, u_ref, s=1.0)
+    rel_h1_curve_mean = torch.nanmean(rel_h1, dim=0).cpu().numpy()
+    rel_h1_curve_median = np.nanmedian(rel_h1.cpu().numpy(), axis=0)
+    rel_h1_per_sample_mean = torch.nanmean(rel_h1, dim=1).cpu().numpy()
 
     return {
-        "mse_curve_mean": mse_curve_mean.astype(np.float64),
-        "mse_curve_median": mse_curve_median.astype(np.float64),
         "rel_curve_mean": rel_curve_mean.astype(np.float64),
         "rel_curve_median": rel_curve_median.astype(np.float64),
         "rollout_rel_mean": float(np.nanmean(rel_per_sample_mean)),
         "rollout_rel_median": float(np.nanmedian(rel_per_sample_mean)),
+        "rel_h1_curve_mean": rel_h1_curve_mean.astype(np.float64),
+        "rel_h1_curve_median": rel_h1_curve_median.astype(np.float64),
+        "rollout_rel_h1": float(np.nanmean(rel_h1_per_sample_mean)),
+        "rollout_rel_h1_median": float(np.nanmedian(rel_h1_per_sample_mean)),
     }
 
 
 def _save_rollout_curve_csv(
-    mse_curve_mean: np.ndarray,
-    mse_curve_median: np.ndarray,
     rel_curve_mean: np.ndarray,
     rel_curve_median: np.ndarray,
+    rel_h1_curve_mean: np.ndarray,
+    rel_h1_curve_median: np.ndarray,
     time_values: np.ndarray,
     out_path: str,
 ) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["step", "time", "mse_mean", "mse_median", "rel_l2_mean", "rel_l2_median"])
-        for k in range(len(mse_curve_mean)):
+        writer.writerow(
+            [
+                "step",
+                "time",
+                "rel_l2_mean",
+                "rel_l2_median",
+                "rel_h1_mean",
+                "rel_h1_median",
+            ]
+        )
+        for k in range(len(rel_curve_mean)):
             writer.writerow(
                 [
                     k,
                     f"{float(time_values[k]):.8f}",
-                    f"{float(mse_curve_mean[k]):.12e}",
-                    f"{float(mse_curve_median[k]):.12e}",
                     f"{float(rel_curve_mean[k]):.12e}",
                     f"{float(rel_curve_median[k]):.12e}",
+                    f"{float(rel_h1_curve_mean[k]):.12e}",
+                    f"{float(rel_h1_curve_median[k]):.12e}",
                 ]
             )
     print(f"Saved rollout curve csv: {out_path}")
 
 
 def _plot_rollout_curves(
-    mse_curve_mean: np.ndarray,
-    mse_curve_median: np.ndarray,
     rel_curve_mean: np.ndarray,
     rel_curve_median: np.ndarray,
+    rel_h1_curve_mean: np.ndarray,
+    rel_h1_curve_median: np.ndarray,
     time_values: np.ndarray,
     out_path: str,
 ) -> None:
@@ -338,23 +351,23 @@ def _plot_rollout_curves(
         print(f"Skipping curve plotting because matplotlib is unavailable: {exc}")
         return
 
-    t = time_values[: mse_curve_mean.shape[0]]
+    t = time_values[: rel_curve_mean.shape[0]]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), squeeze=False)
     ax1, ax2 = axes[0, 0], axes[0, 1]
 
-    ax1.plot(t, mse_curve_mean, linewidth=2, label="mean")
-    ax1.plot(t, mse_curve_median, linewidth=2, linestyle="--", label="median")
-    ax1.set_title("Rollout MSE Accumulation")
+    ax1.plot(t, rel_curve_mean, linewidth=2, color="tab:orange", label="mean")
+    ax1.plot(t, rel_curve_median, linewidth=2, linestyle="--", color="tab:green", label="median")
+    ax1.set_title("Rollout Relative L2 Accumulation")
     ax1.set_xlabel("time")
-    ax1.set_ylabel("MSE")
+    ax1.set_ylabel("relative L2")
     ax1.legend()
     ax1.grid(alpha=0.3)
 
-    ax2.plot(t, rel_curve_mean, linewidth=2, color="tab:orange", label="mean")
-    ax2.plot(t, rel_curve_median, linewidth=2, linestyle="--", color="tab:green", label="median")
-    ax2.set_title("Rollout Relative L2 Accumulation")
+    ax2.plot(t, rel_h1_curve_mean, linewidth=2, color="tab:red", label="mean")
+    ax2.plot(t, rel_h1_curve_median, linewidth=2, linestyle="--", color="tab:purple", label="median")
+    ax2.set_title("Rollout Relative H1 Accumulation")
     ax2.set_xlabel("time")
-    ax2.set_ylabel("relative L2")
+    ax2.set_ylabel("relative H1")
     ax2.legend()
     ax2.grid(alpha=0.3)
 
@@ -575,36 +588,39 @@ def main(args: argparse.Namespace) -> None:
         area=area,
         delta_clip=args.delta_clip,
     )
-    mse_curve_mean = curves["mse_curve_mean"]
-    mse_curve_median = curves["mse_curve_median"]
     rel_curve_mean = curves["rel_curve_mean"]
     rel_curve_median = curves["rel_curve_median"]
     print(f"Split one-step MSE: {step_mse:.8e}")
     print(f"Split rollout mean relative L2: {rollout_rel:.8e}")
     print(f"Split rollout median relative L2: {curves['rollout_rel_median']:.8e}")
-    print("Rollout accumulation by step (step, time, mse_mean, mse_median, rel_l2_mean, rel_l2_median):")
-    for k in range(len(mse_curve_mean)):
+    print(f"Split rollout mean relative H1: {curves['rollout_rel_h1']:.8e}")
+    print(f"Split rollout median relative H1: {curves['rollout_rel_h1_median']:.8e}")
+    print(
+        "Rollout accumulation by step "
+        "(step, time, rel_l2_mean, rel_l2_median, rel_h1_mean, rel_h1_median):"
+    )
+    for k in range(len(rel_curve_mean)):
         print(
             f"  {k:03d}  {float(time_values[k]):8.4f}  "
-            f"{mse_curve_mean[k]:.8e}  {mse_curve_median[k]:.8e}  "
-            f"{rel_curve_mean[k]:.8e}  {rel_curve_median[k]:.8e}"
+            f"{rel_curve_mean[k]:.8e}  {rel_curve_median[k]:.8e}  "
+            f"{curves['rel_h1_curve_mean'][k]:.8e}  {curves['rel_h1_curve_median'][k]:.8e}"
         )
 
     curve_csv = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.csv")
     curve_png = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png")
     _save_rollout_curve_csv(
-        mse_curve_mean=curves["mse_curve_mean"],
-        mse_curve_median=curves["mse_curve_median"],
         rel_curve_mean=curves["rel_curve_mean"],
         rel_curve_median=curves["rel_curve_median"],
+        rel_h1_curve_mean=curves["rel_h1_curve_mean"],
+        rel_h1_curve_median=curves["rel_h1_curve_median"],
         time_values=time_values,
         out_path=curve_csv,
     )
     _plot_rollout_curves(
-        mse_curve_mean=curves["mse_curve_mean"],
-        mse_curve_median=curves["mse_curve_median"],
         rel_curve_mean=curves["rel_curve_mean"],
         rel_curve_median=curves["rel_curve_median"],
+        rel_h1_curve_mean=curves["rel_h1_curve_mean"],
+        rel_h1_curve_median=curves["rel_h1_curve_median"],
         time_values=time_values,
         out_path=curve_png,
     )
@@ -637,10 +653,12 @@ def main(args: argparse.Namespace) -> None:
         "step_mse": step_mse,
         "rollout_rel_l2": rollout_rel,
         "rollout_rel_l2_median": curves["rollout_rel_median"],
-        "mse_curve_mean": curves["mse_curve_mean"].tolist(),
-        "mse_curve_median": curves["mse_curve_median"].tolist(),
+        "rollout_rel_h1": curves["rollout_rel_h1"],
+        "rollout_rel_h1_median": curves["rollout_rel_h1_median"],
         "rel_curve_mean": curves["rel_curve_mean"].tolist(),
         "rel_curve_median": curves["rel_curve_median"].tolist(),
+        "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
+        "rel_h1_curve_median": curves["rel_h1_curve_median"].tolist(),
         "snapshot_times": snapshot_times,
         "seed": int(args.seed),
         "meta": meta,
