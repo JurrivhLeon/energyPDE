@@ -47,7 +47,14 @@ def _unpack_traj_batch(batch):
     raise ValueError("Trajectory batch must be dict with keys u0,f,u_traj or tuple/list (u0,f,u_traj)")
 
 
-def rollout_latent_markov_2d(model, u0: torch.Tensor, f: torch.Tensor, n_steps: int, dt: float) -> torch.Tensor:
+def rollout_latent_markov_2d(
+    model,
+    u0: torch.Tensor,
+    f: torch.Tensor,
+    n_steps: int,
+    dt: float,
+    delta_clip: Optional[float] = None,
+) -> torch.Tensor:
     squeeze = False
     if u0.dim() == 2:
         u0 = u0.unsqueeze(0)
@@ -57,7 +64,13 @@ def rollout_latent_markov_2d(model, u0: torch.Tensor, f: torch.Tensor, n_steps: 
     states = [u0]
     u = u0
     for _ in range(n_steps):
-        u = model.predict_step(u, f, dt=dt)
+        u_tilde = model.predict_step(u, f, dt=dt)
+        delta = u_tilde - u
+        if delta_clip is not None and float(delta_clip) > 0.0:
+            delta = torch.clamp(delta, min=-float(delta_clip), max=float(delta_clip))
+        u = u + delta
+        finite = torch.isfinite(u).flatten(1).all(dim=1)
+        u = torch.where(finite[:, None, None], u, states[-1])
         states.append(u)
 
     traj = torch.stack(states, dim=1)
@@ -70,6 +83,30 @@ def relative_l2_error_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, area: float)
     diff = u_pred - u_ref
     num = torch.sqrt(float(area) * torch.sum(diff * diff, dim=(-2, -1)))
     den = torch.sqrt(float(area) * torch.sum(u_ref * u_ref, dim=(-2, -1)))
+    return num / (den + 1e-8)
+
+
+def relative_spectral_hs_error_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, s: float) -> torch.Tensor:
+    if u_pred.shape != u_ref.shape:
+        raise ValueError(f"u_pred and u_ref must have identical shape, got {tuple(u_pred.shape)} vs {tuple(u_ref.shape)}")
+    if u_pred.dim() < 2:
+        raise ValueError(f"Expected tensors with at least 2 spatial dimensions, got {tuple(u_pred.shape)}")
+
+    n_x = int(u_pred.shape[-2])
+    n_y = int(u_pred.shape[-1])
+    diff_hat = torch.fft.fft2(u_pred - u_ref, dim=(-2, -1), norm="ortho")
+    ref_hat = torch.fft.fft2(u_ref, dim=(-2, -1), norm="ortho")
+
+    real_dtype = u_pred.real.dtype
+    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u_pred.device).to(dtype=real_dtype)
+    ky = 2.0 * torch.pi * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u_pred.device).to(dtype=real_dtype)
+    kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
+    weight = (1.0 + kx_grid.square() + ky_grid.square()).pow(float(s))
+
+    diff_power = diff_hat.real.square() + diff_hat.imag.square()
+    ref_power = ref_hat.real.square() + ref_hat.imag.square()
+    num = torch.sqrt(torch.sum(diff_power * weight, dim=(-2, -1)))
+    den = torch.sqrt(torch.sum(ref_power * weight, dim=(-2, -1)))
     return num / (den + 1e-8)
 
 
@@ -106,6 +143,7 @@ class LatentMarkovTrainer2D:
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         grad_clip: float = 1.0,
+        rollout_delta_clip: Optional[float] = 10.0,
         lr_step_size: int = 100,
         lr_gamma: float = 0.5,
         device: str = "cpu",
@@ -121,6 +159,7 @@ class LatentMarkovTrainer2D:
         self.lambda_spec = float(lambda_spec)
         self.spectral_s = float(spectral_s)
         self.grad_clip = float(grad_clip)
+        self.rollout_delta_clip = None if rollout_delta_clip is None else float(rollout_delta_clip)
         self.device = device
         self.output_dir = output_dir
         self.show_epoch_pbar = bool(show_epoch_pbar)
@@ -215,7 +254,14 @@ class LatentMarkovTrainer2D:
                     f = f.to(self.device)
                     u_ref = u_ref.to(self.device)
                     n_steps = int(u_ref.shape[1] - 1)
-                    u_pred = rollout_latent_markov_2d(self.model, u0=u0, f=f, n_steps=n_steps, dt=self.dt)
+                    u_pred = rollout_latent_markov_2d(
+                        self.model,
+                        u0=u0,
+                        f=f,
+                        n_steps=n_steps,
+                        dt=self.dt,
+                        delta_clip=self.rollout_delta_clip,
+                    )
                     rel = relative_l2_error_2d(u_pred, u_ref, area=self.area)
                     rollout_meter.update(rel.mean(dim=-1).mean().item(), int(u0.shape[0]))
             metrics["val_rollout_rel_l2"] = rollout_meter.avg
@@ -237,6 +283,7 @@ class LatentMarkovTrainer2D:
                 "lambda_recon": self.lambda_recon,
                 "lambda_spec": self.lambda_spec,
                 "spectral_s": self.spectral_s,
+                "rollout_delta_clip": self.rollout_delta_clip,
             },
             os.path.join(self.output_dir, name),
         )
