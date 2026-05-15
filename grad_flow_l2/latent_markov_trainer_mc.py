@@ -268,14 +268,14 @@ class LatentMarkovTrainer2D:
             metrics["val_rollout_rel_l2"] = rollout_meter.avg
         return metrics
 
-    def _save_checkpoint(self, name: str, epoch: int, metrics: Dict[str, float]) -> None:
+    def _save_checkpoint(self, name: str, epoch: int, metrics: Dict[str, float], state_dict=None) -> None:
         if self.output_dir is None:
             return
         os.makedirs(self.output_dir, exist_ok=True)
         torch.save(
             {
                 "epoch": epoch,
-                "model_state_dict": self.model.state_dict(),
+                "model_state_dict": state_dict if state_dict is not None else self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "metrics": metrics,
                 "dt": self.dt,
@@ -303,6 +303,7 @@ class LatentMarkovTrainer2D:
         best_metric = float("inf")
         best_epoch = 0
         best_metrics: Optional[Dict[str, float]] = None
+        best_state_dict = None
         for epoch in range(1, epochs + 1):
             train_metrics = self.train_epoch(train_step_loader, epoch=epoch)
             history["train"].append({"epoch": epoch, **train_metrics})
@@ -314,6 +315,7 @@ class LatentMarkovTrainer2D:
                     best_metric = monitor
                     best_epoch = epoch
                     best_metrics = val_metrics
+                    best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
                     self._save_checkpoint("best_model.pt", epoch, val_metrics)
                 print(
                     f"[Epoch {epoch:03d}] "
@@ -338,7 +340,12 @@ class LatentMarkovTrainer2D:
             if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
                 snapshot_metrics = best_metrics if best_metrics is not None else train_metrics
                 snapshot_epoch = best_epoch if best_metrics is not None else epoch
-                self._save_checkpoint(f"best_model_through_epoch_{epoch:04d}.pt", snapshot_epoch, snapshot_metrics)
+                self._save_checkpoint(
+                    f"best_model_through_epoch_{epoch:04d}.pt",
+                    snapshot_epoch,
+                    snapshot_metrics,
+                    state_dict=best_state_dict,
+                )
             self.scheduler.step()
 
         final_metrics = history["val"][-1] if history["val"] else history["train"][-1]

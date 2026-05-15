@@ -549,7 +549,10 @@ def main(args: argparse.Namespace) -> None:
 
     if args.dry_run:
         print("Dry run val metrics:",  trainer.validate(val_step_loader,  traj_loader=val_traj_loader))
-        print("Dry run test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+        if args.n_test > 0:
+            print("Dry run test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+        else:
+            print("Skipping dry-run test metrics: test split is empty.")
         return
 
     history = trainer.fit(
@@ -564,7 +567,10 @@ def main(args: argparse.Namespace) -> None:
     print("Last train metrics:", history["train"][-1])
     if history["val"]:
         print("Last val metrics:", history["val"][-1])
-    print("Test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+    if args.n_test > 0:
+        print("Test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+    else:
+        print("Skipping test metrics: test split is empty.")
     print(f"Saved training artifacts to: {run_dir}")
 
 

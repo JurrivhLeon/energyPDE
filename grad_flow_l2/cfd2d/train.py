@@ -77,6 +77,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay",        type=float, default=1e-5)
     parser.add_argument("--grad-clip",           type=float, default=1.0)
     parser.add_argument("--lambda-recon",        type=float, default=1.0)
+    parser.add_argument("--rollout-delta-clip", type=float, default=10.0,
+                        help="Clip rollout increments during validation/model selection. Set 0 to disable.")
 
     parser.add_argument("--channel-weights", type=float, nargs=4, default=None,
                         metavar=("W_RHO", "W_VX", "W_VY", "W_P"),
@@ -197,6 +199,7 @@ def main(args: argparse.Namespace) -> None:
         channel_weights=channel_weights,
         lr=args.lr, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma,
         weight_decay=args.weight_decay, grad_clip=args.grad_clip,
+        rollout_delta_clip=args.rollout_delta_clip if args.rollout_delta_clip > 0 else None,
         max_epochs=args.epochs,
         device=device, output_dir=run_dir,
         show_epoch_pbar=not args.no_epoch_pbar,
@@ -204,7 +207,10 @@ def main(args: argparse.Namespace) -> None:
 
     if args.dry_run:
         print("Dry run val metrics:",  trainer.validate(val_step_loader,  traj_loader=val_traj_loader))
-        print("Dry run test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+        if args.n_test > 0:
+            print("Dry run test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+        else:
+            print("Skipping dry-run test metrics: test split is empty.")
         return
 
     history = trainer.fit(
@@ -219,7 +225,10 @@ def main(args: argparse.Namespace) -> None:
     print("Last train metrics:", history["train"][-1])
     if history["val"]:
         print("Last val metrics:", history["val"][-1])
-    print("Test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+    if args.n_test > 0:
+        print("Test metrics:", trainer.validate(test_step_loader, traj_loader=test_traj_loader))
+    else:
+        print("Skipping test metrics: test split is empty.")
     print(f"Saved training artifacts to: {run_dir}")
 
 

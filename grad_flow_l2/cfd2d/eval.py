@@ -7,7 +7,7 @@ import csv
 import json
 import os
 from argparse import Namespace
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -43,9 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers",     type=int, default=0)
     parser.add_argument("--n-plot-samples",  type=int,   default=4)
     parser.add_argument("--snapshot-times",  type=str,   default="")
-    parser.add_argument("--delta-clip",      type=float, default=1.0,
-                        help="Clip predicted increment per step to [-delta_clip, delta_clip]. "
-                             "Set 0 to disable.")
+    parser.add_argument("--delta-clip",      type=float, default=None,
+                        help="Clip predicted increment per step. Default: checkpoint training value; set 0 to disable.")
     parser.add_argument("--cpu",             action="store_true")
     return parser.parse_args()
 
@@ -69,10 +68,23 @@ def _parse_snapshot_times(raw: str, t_final: float) -> List[float]:
     return vals
 
 
+def _channel_weights_from_args_or_checkpoint(train_args: Namespace, checkpoint) -> Optional[torch.Tensor]:
+    weights = getattr(train_args, "channel_weights_used", None)
+    if weights is None:
+        weights = checkpoint.get("channel_weights")
+    return None if weights is None else torch.as_tensor(weights, dtype=torch.float32)
+
+
+def _resolve_delta_clip(cli_value: Optional[float], checkpoint, default: Optional[float]) -> Optional[float]:
+    value = checkpoint.get("rollout_delta_clip", default) if cli_value is None else cli_value
+    return None if value is None or float(value) <= 0.0 else float(value)
+
+
 @torch.no_grad()
 def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
                                dt: float, area: float,
-                               delta_clip: Optional[float] = None) -> Dict[str, np.ndarray]:
+                               delta_clip: Optional[float] = None,
+                               rollout_fn: Callable = rollout_latent_markov_2d) -> Dict[str, np.ndarray]:
     """
     Compute per-channel rollout relative L2 error curves.
 
@@ -88,9 +100,9 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
         u0    = batch["u0"].to(device)
         f     = batch["f"].to(device)
         u_ref = batch["u_traj"].to(device)              # (B, T+1, C, H, W)
-        u_pred = rollout_latent_markov_2d(model, u0=u0, f=f,
-                                   n_steps=int(u_ref.shape[1] - 1), dt=dt,
-                                   delta_clip=delta_clip)
+        u_pred = rollout_fn(model, u0=u0, f=f,
+                            n_steps=int(u_ref.shape[1] - 1), dt=dt,
+                            delta_clip=delta_clip)
         diff = u_pred - u_ref                           # (B, T+1, C, H, W)
         # Per-channel relative L2: sqrt(area * Σ_spatial diff²) / sqrt(area * Σ_spatial ref²)
         num = torch.sqrt(float(area) * diff.pow(2).sum(dim=(-2, -1)))   # (B, T+1, C)
@@ -164,7 +176,8 @@ def _plot_curve(curves: Dict[str, np.ndarray], dt: float, path: str) -> None:
 @torch.no_grad()
 def _plot_samples(model, split, device: str, dt: float, t_final: float,
                   snapshot_times: List[float], n_plot_samples: int, out_dir: str,
-                  delta_clip: Optional[float] = None) -> None:
+                  delta_clip: Optional[float] = None,
+                  rollout_fn: Callable = rollout_latent_markov_2d) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
@@ -178,8 +191,8 @@ def _plot_samples(model, split, device: str, dt: float, t_final: float,
         u0  = split["u0"][sample_id:sample_id + 1].to(device)
         f   = split["f"][sample_id:sample_id + 1].to(device)
         ref  = split["u_traj"][sample_id]                                   # (T+1, 4, nx, ny)
-        pred = rollout_latent_markov_2d(model, u0=u0, f=f, n_steps=n_steps, dt=dt,
-                                delta_clip=delta_clip)[0].cpu()
+        pred = rollout_fn(model, u0=u0, f=f, n_steps=n_steps, dt=dt,
+                          delta_clip=delta_clip)[0].cpu()
         cols = len(snapshot_times)
 
         # Colorbar limits from the reference trajectory (all time steps, per channel).
@@ -221,6 +234,8 @@ def main(args: argparse.Namespace) -> None:
 
     splits = load_dataset_splits(args.dataset_path, map_location="cpu")
     split  = splits[args.split]
+    if int(split["u0"].shape[0]) == 0:
+        raise ValueError(f"Requested split {args.split!r} is empty")
     meta   = splits.get("meta", {})
     n_x    = int(split["u0"].shape[-2])
     n_y    = int(split["u0"].shape[-1])
@@ -238,10 +253,11 @@ def main(args: argparse.Namespace) -> None:
     traj_loader = DataLoader(build_cfd2d_trajectory_dataset_from_split(split),
                              batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
+    channel_weights = _channel_weights_from_args_or_checkpoint(train_args, checkpoint)
     trainer = LatentMarkovTrainer2D(model=model, dt=dt, h_x=1.0 / float(n_x), h_y=1.0 / float(n_y),
-                                          lambda_spec=0.0, device=device,
+                                          lambda_spec=0.0, channel_weights=channel_weights, device=device,
                                           output_dir=None, show_epoch_pbar=False)
-    delta_clip = float(args.delta_clip) if float(args.delta_clip) > 0.0 else None
+    delta_clip = _resolve_delta_clip(args.delta_clip, checkpoint, default=10.0)
     trainer.delta_clip = delta_clip
 
     metrics = trainer.validate(step_loader, traj_loader=None)

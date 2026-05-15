@@ -19,9 +19,11 @@ try:
         _plot_samples,
         _save_curve_csv,
         _torch_load_checkpoint,
+        _channel_weights_from_args_or_checkpoint,
+        _resolve_delta_clip,
     )
     from ..heat_data import load_dataset_splits
-    from ..ns2d_per.train_vae import PeriodicLatentVAETrainer2D
+    from ..cfd2d.train_vae import LatentVAETrainer2D, _rollout_vae_mean
     from .train_vae import _build_model
 except ImportError:
     from grad_flow_l2.cfd2d.cfd_data import build_cfd2d_step_dataset, build_cfd2d_trajectory_dataset_from_split
@@ -32,9 +34,11 @@ except ImportError:
         _plot_samples,
         _save_curve_csv,
         _torch_load_checkpoint,
+        _channel_weights_from_args_or_checkpoint,
+        _resolve_delta_clip,
     )
     from grad_flow_l2.heat_data import load_dataset_splits
-    from grad_flow_l2.ns2d_per.train_vae import PeriodicLatentVAETrainer2D
+    from grad_flow_l2.cfd2d.train_vae import LatentVAETrainer2D, _rollout_vae_mean
     from grad_flow_l2.cfd2d.train_vae import _build_model
 
 
@@ -57,8 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers",    type=int, default=0)
     parser.add_argument("--n-plot-samples", type=int,   default=4)
     parser.add_argument("--snapshot-times", type=str,   default="")
-    parser.add_argument("--delta-clip",     type=float, default=1.0,
-                        help="Clip predicted increment per step. Set 0 to disable.")
+    parser.add_argument("--delta-clip",     type=float, default=None,
+                        help="Clip predicted increment per step. Default: checkpoint training value; set 0 to disable.")
     parser.add_argument("--cpu",            action="store_true")
     return parser.parse_args()
 
@@ -72,6 +76,8 @@ def main(args: argparse.Namespace) -> None:
 
     splits = load_dataset_splits(args.dataset_path, map_location="cpu")
     split  = splits[args.split]
+    if int(split["u0"].shape[0]) == 0:
+        raise ValueError(f"Requested split {args.split!r} is empty")
     meta   = splits.get("meta", {})
     n_x    = int(split["u0"].shape[-2])
     n_y    = int(split["u0"].shape[-1])
@@ -89,19 +95,21 @@ def main(args: argparse.Namespace) -> None:
     traj_loader = DataLoader(build_cfd2d_trajectory_dataset_from_split(split),
                              batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    trainer = PeriodicLatentVAETrainer2D(
+    channel_weights = _channel_weights_from_args_or_checkpoint(train_args, checkpoint)
+    trainer = LatentVAETrainer2D(
         model=model, dt=dt,
         h_x=1.0 / float(n_x), h_y=1.0 / float(n_y),
         beta_kl=getattr(train_args, "beta_kl", checkpoint.get("beta_kl", 1e-4)),
         lambda_rec=getattr(train_args, "lambda_rec", checkpoint.get("lambda_rec", 1.0)),
+        channel_weights=channel_weights,
         device=device, output_dir=None, show_epoch_pbar=False,
     )
-    delta_clip = float(args.delta_clip) if float(args.delta_clip) > 0.0 else None
+    delta_clip = _resolve_delta_clip(args.delta_clip, checkpoint, default=1.0)
     trainer.delta_clip = delta_clip
 
     metrics = trainer.validate(step_loader, traj_loader=None)
     curves  = _evaluate_rollout_curves(model, traj_loader, device=device, dt=dt, area=area,
-                                        delta_clip=delta_clip)
+                                        delta_clip=delta_clip, rollout_fn=_rollout_vae_mean)
     metrics["rollout_rel_l2"]        = curves["rollout_rel_mean"]
     metrics["rollout_rel_l2_median"] = curves["rollout_rel_median"]
     for c, name in enumerate(CHANNEL_NAMES):
@@ -121,7 +129,7 @@ def main(args: argparse.Namespace) -> None:
                   _parse_snapshot_times(args.snapshot_times, t_final),
                   args.n_plot_samples,
                   os.path.join(args.output_dir, f"{args.split}_sample_comparisons"),
-                  delta_clip=delta_clip)
+                  delta_clip=delta_clip, rollout_fn=_rollout_vae_mean)
 
 
 if __name__ == "__main__":
