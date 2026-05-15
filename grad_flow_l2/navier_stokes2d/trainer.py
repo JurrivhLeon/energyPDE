@@ -47,7 +47,15 @@ def _unpack_traj_batch(batch):
     raise ValueError("Trajectory batch must be dict with keys u0,f,u_traj or tuple/list (u0,f,u_traj)")
 
 
-def rollout_model_2d(model, u0: torch.Tensor, f: torch.Tensor, n_steps: int, dt: float) -> torch.Tensor:
+def rollout_model_2d(
+    model,
+    u0: torch.Tensor,
+    f: torch.Tensor,
+    n_steps: int,
+    dt: float,
+    delta_clip: Optional[float] = None,
+    state_clip: Optional[float] = None,
+) -> torch.Tensor:
     squeeze = False
     if u0.dim() == 2:
         u0 = u0.unsqueeze(0)
@@ -57,10 +65,19 @@ def rollout_model_2d(model, u0: torch.Tensor, f: torch.Tensor, n_steps: int, dt:
     states = [u0]
     u = u0
     for _ in range(n_steps):
-        u = model.predict_step(u, f, dt=dt)
+        u_next = model.predict_step(u, f, dt=dt)
+        delta = u_next - u
+        if delta_clip is not None and float(delta_clip) > 0.0:
+            delta = delta.clamp(min=-float(delta_clip), max=float(delta_clip))
+        u_next = u + delta
+        finite = torch.isfinite(u_next).flatten(1).all(dim=1)
+        u_next = torch.where(finite.reshape(-1, *([1] * (u_next.dim() - 1))), u_next, u)
+        if state_clip is not None and float(state_clip) > 0.0:
+            u_next = u_next.clamp(min=-float(state_clip), max=float(state_clip))
+        u = u_next
         states.append(u)
 
-    traj = torch.stack(states, dim=1)  # (batch, K+1, n_x, n_y)
+    traj = torch.stack(states, dim=1)  # (batch, K+1, ...)
     if squeeze:
         return traj.squeeze(0)
     return traj
@@ -71,6 +88,30 @@ def relative_l2_error_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, area: float)
     num = torch.sqrt(float(area) * torch.sum(diff * diff, dim=(-2, -1)))
     den = torch.sqrt(float(area) * torch.sum(u_ref * u_ref, dim=(-2, -1)))
     return num / (den + 1e-8)
+
+
+def channel_weighted_mse(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    MSE with optional per-channel weights.
+
+    weights : (C,) tensor of non-negative scalars.  When None or all-equal
+              this reduces to F.mse_loss.  Weights are normalised to sum to C
+              so the loss magnitude stays comparable across weight choices.
+    """
+    if weights is None:
+        return F.mse_loss(pred, target)
+    diff_sq = (pred - target).pow(2)                     # (..., C, H, W)
+    # mean over every dim except channel (second-to-last spatial block)
+    ch_dim = pred.dim() - 3                              # channel axis
+    dims = list(range(pred.dim()))
+    dims.pop(ch_dim)
+    per_ch = diff_sq.mean(dim=dims)                      # (C,)
+    w = weights.to(pred.device, dtype=pred.dtype)
+    return (w * per_ch).sum() * pred.shape[ch_dim] / w.sum()
 
 
 def spectral_sobolev_loss_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, s: float) -> torch.Tensor:
@@ -126,6 +167,7 @@ class HiddenGradientFlowTrainer2D:
         lambda_prox: float = 1.0,
         lambda_spec: float = 0.0,
         spectral_s: float = 1.0,
+        channel_weights: Optional[torch.Tensor] = None,
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         grad_clip: float = 1.0,
@@ -146,6 +188,8 @@ class HiddenGradientFlowTrainer2D:
         self.lambda_prox = float(lambda_prox)
         self.lambda_spec = float(lambda_spec)
         self.spectral_s = float(spectral_s)
+        self.channel_weights = channel_weights
+        self.delta_clip: Optional[float] = None    # set after construction if needed
         self.grad_clip = float(grad_clip)
         self.device = device
         self.output_dir = output_dir
@@ -167,14 +211,14 @@ class HiddenGradientFlowTrainer2D:
             raise ValueError("predict_step(..., return_latent=True) must return (u_next, z_k, z_next)")
         u_pred, z_k, z_next = pred
 
-        loss_step = F.mse_loss(u_pred, u_k1_data)
+        loss_step = channel_weighted_mse(u_pred, u_k1_data, self.channel_weights)
         if self.lambda_spec > 0.0:
             loss_spec = spectral_sobolev_loss_2d(u_pred, u_k1_data, s=self.spectral_s)
         else:
             loss_spec = loss_step.new_zeros(())
 
         u_recon = self.model.decode(z_k)
-        loss_recon = F.mse_loss(u_recon, u_k)
+        loss_recon = channel_weighted_mse(u_recon, u_k, self.channel_weights)
 
         if self.use_energy_losses:
             e_prev = self.model.latent_energy(z_k, f)
@@ -284,6 +328,7 @@ class HiddenGradientFlowTrainer2D:
 
         if traj_loader is not None:
             rollout_meter = AverageMeter()
+            ch_meters: Optional[list] = None
             with torch.no_grad():
                 for batch in traj_loader:
                     u0, f, u_ref = _unpack_traj_batch(batch)
@@ -292,11 +337,23 @@ class HiddenGradientFlowTrainer2D:
                     u_ref = u_ref.to(self.device)
 
                     n_steps = int(u_ref.shape[1] - 1)
-                    u_pred = rollout_model_2d(self.model, u0=u0, f=f, n_steps=n_steps, dt=self.dt)
-                    rel = relative_l2_error_2d(u_pred, u_ref, area=self.area)  # (batch, K+1)
-                    rollout_err = rel.mean(dim=-1)
-                    rollout_meter.update(rollout_err.mean().item(), int(u0.shape[0]))
+                    u_pred = rollout_model_2d(self.model, u0=u0, f=f, n_steps=n_steps, dt=self.dt,
+                                              delta_clip=self.delta_clip)
+                    # Per-channel relative L2: (batch, T+1, C) or (batch, T+1)
+                    rel = relative_l2_error_2d(u_pred, u_ref, area=self.area)
+                    bsz = int(u0.shape[0])
+                    if rel.dim() == 3:                  # multi-channel: (B, T+1, C)
+                        if ch_meters is None:
+                            ch_meters = [AverageMeter() for _ in range(rel.shape[2])]
+                        for c in range(rel.shape[2]):
+                            ch_meters[c].update(rel[:, :, c].mean().item(), bsz)
+                        rollout_meter.update(rel.mean(dim=2).mean().item(), bsz)
+                    else:                               # single-channel (B, T+1)
+                        rollout_meter.update(rel.mean(dim=1).mean().item(), bsz)
             metrics["val_rollout_rel_l2"] = rollout_meter.avg
+            if ch_meters is not None:
+                for c, m in enumerate(ch_meters):
+                    metrics[f"val_rollout_rel_l2_ch{c}"] = m.avg
 
         return metrics
 
