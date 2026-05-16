@@ -118,6 +118,9 @@ class LatentVAETrainer2D:
         lambda_rec: float = 1.0,
         channel_weights=None,            # (C,) tensor or None → uniform
         spectral_var_floor: float = 1e-2,
+        alpha_min: float = 1e-4,
+        alpha_max: float = 0.5,
+        transition_noise_scale: float = 1.0,
         rollout_delta_clip: Optional[float] = 1.0,
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
@@ -137,6 +140,13 @@ class LatentVAETrainer2D:
         self.beta_kl = float(beta_kl)
         self.lambda_rec = float(lambda_rec)
         self.spectral_var_floor = float(spectral_var_floor)
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        if self.alpha_min < 0.0 or self.alpha_max <= self.alpha_min:
+            raise ValueError("alpha bounds must satisfy 0 <= alpha_min < alpha_max")
+        self.transition_noise_scale = float(transition_noise_scale)
+        if self.transition_noise_scale < 0.0:
+            raise ValueError("transition_noise_scale must be >= 0")
         self.rollout_delta_clip = None if rollout_delta_clip is None else float(rollout_delta_clip)
         self.grad_clip = float(grad_clip)
         self.device = device
@@ -164,9 +174,6 @@ class LatentVAETrainer2D:
             return None
         return self.channel_weights.to(device=tensor.device, dtype=tensor.dtype)
 
-    def _bounded_alpha(self, raw: torch.Tensor) -> torch.Tensor:
-        return 1e-4 + (0.5 - 1e-4) * torch.sigmoid(raw)
-
     def _filtered_noise(self, shape, device, dtype) -> torch.Tensor:
         xi = torch.randn(shape, device=device, dtype=dtype)
         xi_hat = torch.fft.rfft2(xi, dim=(-2, -1), norm="ortho")
@@ -188,7 +195,7 @@ class LatentVAETrainer2D:
 
         # Prior / transition
         mu_p, prior_logvar_scalar = self.model.prior_stats(z_k, f, dt=self.dt)
-        alpha = self._bounded_alpha(torch.exp(0.5 * prior_logvar_scalar))
+        alpha = torch.exp(0.5 * prior_logvar_scalar)
         noise = self._filtered_noise(mu_p.shape, device=mu_p.device, dtype=mu_p.dtype)
         z_next = mu_p + alpha.view(-1, 1, 1, 1) * noise
 
@@ -299,6 +306,8 @@ class LatentVAETrainer2D:
             "metrics": metrics,
             "dt": self.dt, "h_x": self.h_x, "h_y": self.h_y,
             "beta_kl": self.beta_kl, "lambda_rec": self.lambda_rec,
+            "alpha_min": self.alpha_min, "alpha_max": self.alpha_max,
+            "transition_noise_scale": self.transition_noise_scale,
             "rollout_delta_clip": self.rollout_delta_clip,
             "channel_weights": (None if self.channel_weights is None
                                  else self.channel_weights.detach().cpu()),
@@ -410,6 +419,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noise-corr-length",  type=float, default=1.0)
     parser.add_argument("--noise-decay-s",      type=float, default=2.0)
     parser.add_argument("--spectral-var-floor", type=float, default=1e-2)
+    parser.add_argument("--alpha-min", type=float, default=1e-4,
+                        help="Minimum transition-noise amplitude before global scaling.")
+    parser.add_argument("--alpha-max", type=float, default=0.5,
+                        help="Maximum transition-noise amplitude before global scaling.")
+    parser.add_argument("--alpha-init", type=float, default=0.075,
+                        help="Initial transition-noise amplitude before global scaling.")
+    parser.add_argument("--transition-noise-scale", type=float, default=1.0,
+                        help="Global multiplier on sampled latent transition noise; use small positive values to suppress blur.")
     parser.add_argument("--rollout-delta-clip", type=float, default=1.0)
 
     parser.add_argument("--epochs",              type=int,   default=200)
@@ -467,18 +484,29 @@ def _build_model(n_x: int, n_y: int, dt: float,
         default_dt=dt,
         boundary_condition=bc,
     )
+    alpha_min = float(getattr(args, "alpha_min", 1e-4))
+    alpha_max = float(getattr(args, "alpha_max", 0.5))
+    alpha_init = float(getattr(args, "alpha_init", 0.075))
+    if not alpha_min < alpha_init < alpha_max:
+        raise ValueError("alpha_init must satisfy alpha_min < alpha_init < alpha_max")
+    alpha_init_unit = (alpha_init - alpha_min) / (alpha_max - alpha_min)
+    alpha_init_logit = float(np.log(alpha_init_unit / (1.0 - alpha_init_unit)))
     amplitude_head = TransitionAmplitudeHead2D(
         n_x=n_x, n_y=n_y,
         latent_channels=args.latent_channels,
         hidden_channels=args.amp_head_hidden,
         use_forcing_channel=use_forcing,
         boundary_condition=bc,
+        alpha_init_logit=alpha_init_logit,
     )
     return PeriodicLatentVAE2D(
         encoder=encoder, decoder=decoder,
         transition=transition, amplitude_head=amplitude_head,
         noise_corr_length=args.noise_corr_length,
         noise_decay_s=args.noise_decay_s,
+        alpha_min=alpha_min,
+        alpha_max=alpha_max,
+        transition_noise_scale=float(getattr(args, "transition_noise_scale", 1.0)),
     )
 
 
@@ -539,6 +567,9 @@ def main(args: argparse.Namespace) -> None:
         lambda_rec=args.lambda_rec,
         channel_weights=channel_weights,
         spectral_var_floor=args.spectral_var_floor,
+        alpha_min=args.alpha_min,
+        alpha_max=args.alpha_max,
+        transition_noise_scale=args.transition_noise_scale,
         rollout_delta_clip=args.rollout_delta_clip if args.rollout_delta_clip > 0 else None,
         lr=args.lr, lr_step_size=args.lr_step_size, lr_gamma=args.lr_gamma,
         weight_decay=args.weight_decay, grad_clip=args.grad_clip,

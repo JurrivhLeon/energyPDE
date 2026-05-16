@@ -426,6 +426,8 @@ def main(args: argparse.Namespace) -> None:
         h_y=h_y,
         beta_kl=getattr(train_args, "beta_kl", checkpoint.get("beta_kl", 1e-4)),
         lambda_rec=getattr(train_args, "lambda_rec", checkpoint.get("lambda_rec", 1.0)),
+        alpha_min=getattr(train_args, "alpha_min", checkpoint.get("alpha_min", 1e-4)),
+        alpha_max=getattr(train_args, "alpha_max", checkpoint.get("alpha_max", 0.5)),
         device=device,
         output_dir=None,
         show_epoch_pbar=False,

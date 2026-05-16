@@ -103,6 +103,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp-head-hidden", type=int, default=32)
     parser.add_argument("--noise-corr-length", type=float, default=1.0)
     parser.add_argument("--noise-decay-s", type=float, default=2.0)
+    parser.add_argument("--alpha-min", type=float, default=1e-4)
+    parser.add_argument("--alpha-max", type=float, default=0.5)
+    parser.add_argument("--alpha-init", type=float, default=0.075)
 
     parser.add_argument("--n-plot-samples", type=int, default=8)
     parser.add_argument("--snapshot-times", type=str, default="0.2,0.4,0.6,0.8,1.0,2.0,3.0,4.0,5.0")
@@ -137,6 +140,9 @@ def _merge_training_args(args: argparse.Namespace) -> argparse.Namespace:
         "amp_head_hidden",
         "noise_corr_length",
         "noise_decay_s",
+        "alpha_min",
+        "alpha_max",
+        "alpha_init",
     ):
         if key in train_args:
             setattr(args, key, train_args[key])
@@ -174,12 +180,20 @@ def _build_model(n_x: int, dt: float, boundary_condition: str, args: argparse.Na
         use_grid_features=not args.disable_fno_grid,
         default_dt=dt,
     )
+    alpha_min = float(getattr(args, "alpha_min", 1e-4))
+    alpha_max = float(getattr(args, "alpha_max", 0.5))
+    alpha_init = float(getattr(args, "alpha_init", 0.075))
+    if not alpha_min < alpha_init < alpha_max:
+        raise ValueError("alpha_init must satisfy alpha_min < alpha_init < alpha_max")
+    alpha_init_unit = (alpha_init - alpha_min) / (alpha_max - alpha_min)
+    alpha_init_logit = float(np.log(alpha_init_unit / (1.0 - alpha_init_unit)))
     amplitude_head = TransitionAmplitudeHead1D(
         n_x=n_x,
         latent_channels=args.latent_channels,
         hidden_channels=args.amp_head_hidden,
         use_forcing_channel=use_forcing_channel,
         boundary_condition=boundary_condition,
+        alpha_init_logit=alpha_init_logit,
     )
     return LatentVAE1D(
         encoder=encoder,
@@ -188,6 +202,8 @@ def _build_model(n_x: int, dt: float, boundary_condition: str, args: argparse.Na
         amplitude_head=amplitude_head,
         noise_corr_length=args.noise_corr_length,
         noise_decay_s=args.noise_decay_s,
+        alpha_min=alpha_min,
+        alpha_max=alpha_max,
     )
 
 

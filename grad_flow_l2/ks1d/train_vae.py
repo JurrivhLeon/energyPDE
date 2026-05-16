@@ -152,6 +152,8 @@ class KSLatentVAETrainer1D:
         weight_decay: float = 1e-5,
         grad_clip: float = 1.0,
         spectral_var_floor: float = 1e-2,
+        alpha_min: float = 1e-4,
+        alpha_max: float = 0.5,
         lr_step_size: int = 100,
         lr_gamma: float = 0.5,
         max_epochs: int = 200,
@@ -166,6 +168,10 @@ class KSLatentVAETrainer1D:
         self.lambda_rec = float(lambda_rec)
         self.grad_clip = float(grad_clip)
         self.spectral_var_floor = float(spectral_var_floor)
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        if self.alpha_min < 0.0 or self.alpha_max <= self.alpha_min:
+            raise ValueError("alpha bounds must satisfy 0 <= alpha_min < alpha_max")
         self.device = device
         self.output_dir = output_dir
         self.show_epoch_pbar = bool(show_epoch_pbar)
@@ -176,12 +182,6 @@ class KSLatentVAETrainer1D:
             step_size=max(1, int(lr_step_size)),
             gamma=float(lr_gamma),
         )
-
-    @staticmethod
-    def _bounded_alpha(raw_alpha: torch.Tensor) -> torch.Tensor:
-        alpha_min = 1e-4
-        alpha_max = 0.50
-        return alpha_min + (alpha_max - alpha_min) * torch.sigmoid(raw_alpha)
 
     def _filtered_noise_for_training(self, shape, device, dtype) -> torch.Tensor:
         xi = torch.randn(shape, device=device, dtype=dtype)
@@ -201,8 +201,7 @@ class KSLatentVAETrainer1D:
         z_k = self.model.sample_posterior(mu_q, logvar_q) if sample else mu_q
 
         mu_p, prior_logvar_scalar = self.model.prior_stats(z_k, f, dt=self.dt)
-        raw_alpha = torch.exp(0.5 * prior_logvar_scalar)
-        alpha = self._bounded_alpha(raw_alpha)
+        alpha = torch.exp(0.5 * prior_logvar_scalar)
         if sample:
             noise = self._filtered_noise_for_training(mu_p.shape, device=mu_p.device, dtype=mu_p.dtype)
             z_next = mu_p + alpha.view(-1, 1, 1) * noise
@@ -331,6 +330,8 @@ class KSLatentVAETrainer1D:
                 "beta_kl": self.beta_kl,
                 "lambda_rec": self.lambda_rec,
                 "spectral_var_floor": self.spectral_var_floor,
+                "alpha_min": self.alpha_min,
+                "alpha_max": self.alpha_max,
                 "lr": self.optimizer.param_groups[0]["lr"],
             },
             os.path.join(self.output_dir, name),
@@ -456,6 +457,9 @@ def parse_args() -> argparse.Namespace:
         default=1e-2,
         help="Jitter added to the spectral transition variance used by the training sampler.",
     )
+    parser.add_argument("--alpha-min", type=float, default=1e-4)
+    parser.add_argument("--alpha-max", type=float, default=0.5)
+    parser.add_argument("--alpha-init", type=float, default=0.075)
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--eval-interval", type=int, default=1)
@@ -514,12 +518,20 @@ def _build_model(n_x: int, dt: float, boundary_condition: str, args: argparse.Na
         use_grid_features=not args.disable_fno_grid,
         default_dt=dt,
     )
+    alpha_min = float(getattr(args, "alpha_min", 1e-4))
+    alpha_max = float(getattr(args, "alpha_max", 0.5))
+    alpha_init = float(getattr(args, "alpha_init", 0.075))
+    if not alpha_min < alpha_init < alpha_max:
+        raise ValueError("alpha_init must satisfy alpha_min < alpha_init < alpha_max")
+    alpha_init_unit = (alpha_init - alpha_min) / (alpha_max - alpha_min)
+    alpha_init_logit = float(np.log(alpha_init_unit / (1.0 - alpha_init_unit)))
     amplitude_head = TransitionAmplitudeHead1D(
         n_x=n_x,
         latent_channels=args.latent_channels,
         hidden_channels=args.amp_head_hidden,
         use_forcing_channel=use_forcing_channel,
         boundary_condition=boundary_condition,
+        alpha_init_logit=alpha_init_logit,
     )
     return LatentVAE1D(
         encoder=encoder,
@@ -528,6 +540,8 @@ def _build_model(n_x: int, dt: float, boundary_condition: str, args: argparse.Na
         amplitude_head=amplitude_head,
         noise_corr_length=args.noise_corr_length,
         noise_decay_s=args.noise_decay_s,
+        alpha_min=alpha_min,
+        alpha_max=alpha_max,
     )
 
 
@@ -634,6 +648,8 @@ def main(args: argparse.Namespace) -> None:
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
         spectral_var_floor=args.spectral_var_floor,
+        alpha_min=args.alpha_min,
+        alpha_max=args.alpha_max,
         max_epochs=args.epochs,
         device=device,
         output_dir=run_dir,

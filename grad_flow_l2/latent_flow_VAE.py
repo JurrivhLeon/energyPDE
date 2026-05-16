@@ -338,7 +338,7 @@ class FNOLatentTransition1D(nn.Module):
 
 class TransitionAmplitudeHead1D(nn.Module):
     """
-    Predict a nonnegative scalar transition noise amplitude per sample.
+    Predict an unconstrained scalar transition-noise logit per sample.
     """
 
     def __init__(
@@ -348,6 +348,7 @@ class TransitionAmplitudeHead1D(nn.Module):
         hidden_channels: int = 32,
         use_forcing_channel: bool = True,
         boundary_condition: str = "periodic",
+        alpha_init_logit: float | None = None,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -363,7 +364,9 @@ class TransitionAmplitudeHead1D(nn.Module):
             nn.GELU(),
         )
         self.out = nn.Conv1d(hidden_channels, 1, kernel_size=1)
-        self.softplus = nn.Softplus()
+        if alpha_init_logit is not None:
+            nn.init.zeros_(self.out.weight)
+            nn.init.constant_(self.out.bias, float(alpha_init_logit))
 
     def forward(self, z: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
         squeeze = False
@@ -388,10 +391,10 @@ class TransitionAmplitudeHead1D(nn.Module):
 
         h = self.net(torch.cat(feat, dim=1))
         pooled = h.mean(dim=-1, keepdim=True)
-        alpha = self.softplus(self.out(pooled)).view(batch_size)
+        alpha_logit = self.out(pooled).view(batch_size)
         if squeeze:
-            return alpha.squeeze(0)
-        return alpha
+            return alpha_logit.squeeze(0)
+        return alpha_logit
 
 
 class LatentVAE1D(nn.Module):
@@ -407,6 +410,8 @@ class LatentVAE1D(nn.Module):
         amplitude_head: TransitionAmplitudeHead1D,
         noise_corr_length: float = 1.0,
         noise_decay_s: float = 2.0,
+        alpha_min: float = 1e-4,
+        alpha_max: float = 0.5,
     ):
         super().__init__()
         if noise_corr_length <= 0.0:
@@ -419,6 +424,10 @@ class LatentVAE1D(nn.Module):
         self.amplitude_head = amplitude_head
         self.noise_corr_length = float(noise_corr_length)
         self.noise_decay_s = float(noise_decay_s)
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        if self.alpha_min < 0.0 or self.alpha_max <= self.alpha_min:
+            raise ValueError("alpha bounds must satisfy 0 <= alpha_min < alpha_max")
 
     @property
     def latent_channels(self) -> int:
@@ -451,7 +460,8 @@ class LatentVAE1D(nn.Module):
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:
         mu_p = self.transition(z, f, dt=dt)
-        alpha = self.amplitude_head(z, f)
+        alpha_logit = self.amplitude_head(z, f)
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(alpha_logit)
         prior_logvar_scalar = torch.log(alpha.square() + 1e-12)
         return mu_p, prior_logvar_scalar
 
@@ -689,7 +699,7 @@ class FNOLatentTransition2D(nn.Module):
 
 class TransitionAmplitudeHead2D(nn.Module):
     """
-    Predict a nonnegative scalar transition noise amplitude per sample.
+    Predict an unconstrained scalar transition-noise logit per sample.
     """
 
     def __init__(
@@ -700,6 +710,7 @@ class TransitionAmplitudeHead2D(nn.Module):
         hidden_channels: int = 32,
         use_forcing_channel: bool = True,
         boundary_condition: str = "periodic",
+        alpha_init_logit: float | None = None,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -717,7 +728,9 @@ class TransitionAmplitudeHead2D(nn.Module):
             nn.GELU(),
         )
         self.out = nn.Conv2d(hidden_channels, 1, kernel_size=1)
-        self.softplus = nn.Softplus()
+        if alpha_init_logit is not None:
+            nn.init.zeros_(self.out.weight)
+            nn.init.constant_(self.out.bias, float(alpha_init_logit))
 
     def forward(self, z: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
         squeeze = False
@@ -741,10 +754,10 @@ class TransitionAmplitudeHead2D(nn.Module):
 
         h = self.net(torch.cat(feat, dim=1))
         pooled = h.mean(dim=(-2, -1), keepdim=True)
-        alpha = self.softplus(self.out(pooled)).view(batch_size)
+        alpha_logit = self.out(pooled).view(batch_size)
         if squeeze:
-            return alpha.squeeze(0)
-        return alpha
+            return alpha_logit.squeeze(0)
+        return alpha_logit
 
 
 class PeriodicLatentVAE2D(nn.Module):
@@ -760,6 +773,8 @@ class PeriodicLatentVAE2D(nn.Module):
         amplitude_head: TransitionAmplitudeHead2D,
         noise_corr_length: float = 1.0,
         noise_decay_s: float = 2.0,
+        alpha_min: float = 1e-4,
+        alpha_max: float = 0.5,
     ):
         super().__init__()
         if noise_corr_length <= 0.0:
@@ -773,6 +788,10 @@ class PeriodicLatentVAE2D(nn.Module):
         self.amplitude_head = amplitude_head
         self.noise_corr_length = float(noise_corr_length)
         self.noise_decay_s = float(noise_decay_s)
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        if self.alpha_min < 0.0 or self.alpha_max <= self.alpha_min:
+            raise ValueError("alpha bounds must satisfy 0 <= alpha_min < alpha_max")
 
     @property
     def latent_channels(self) -> int:
@@ -813,7 +832,8 @@ class PeriodicLatentVAE2D(nn.Module):
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:
         mu_p = self.transition(z, f, dt=dt)
-        alpha = self.amplitude_head(z, f)
+        alpha_logit = self.amplitude_head(z, f)
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(alpha_logit)
         prior_logvar_scalar = torch.log(alpha.square() + 1e-12)
         return mu_p, prior_logvar_scalar
 
