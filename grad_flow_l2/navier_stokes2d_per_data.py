@@ -591,13 +591,14 @@ def generate_navier_stokes2d_periodic_dataset_splits(
 
     u_traj_chunks = []
     chunk_starts = range(0, total, int(chunk_size))
+    n_chunks = (total + int(chunk_size) - 1) // int(chunk_size)
     chunk_iter = _iter_with_progress(
         chunk_starts,
-        total=(total + int(chunk_size) - 1) // int(chunk_size),
+        total=n_chunks,
         desc="solve trajectories",
         enabled=show_progress,
     )
-    for start in chunk_iter:
+    for chunk_idx, start in enumerate(chunk_iter, start=1):
         end = min(int(start) + int(chunk_size), total)
         u0_chunk = u0_hr[start:end]
         f_chunk = None if forcing_mode == "zero" else f_hr[start:end]
@@ -608,6 +609,8 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             dt=float(solver_dt),
             record_dt=float(record_dt),
             nu=nu,
+            show_progress=show_progress,
+            progress_desc=f"solve chunk {chunk_idx}/{n_chunks}",
         ).to(dtype=torch.float64)
         u_traj_chunk = spectral_truncate_periodic_field_2d(
             u_traj_chunk_hr.reshape(-1, solver_n_x, solver_n_y),

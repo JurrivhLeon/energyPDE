@@ -66,6 +66,44 @@ def _pad_1d(x: torch.Tensor, padding: int, padding_mode: str) -> torch.Tensor:
     return F.pad(x, (padding, padding), mode=padding_mode)
 
 
+def _ensure_batch_channel_state_1d(
+    u: torch.Tensor,
+    name: str,
+    state_channels: int,
+    n_x: int,
+) -> tuple[torch.Tensor, bool]:
+    if state_channels == 1:
+        if u.dim() == 1:
+            u_b = u.unsqueeze(0)
+            squeeze = True
+        elif u.dim() == 2:
+            u_b = u
+            squeeze = False
+        else:
+            raise ValueError(f"{name} must have shape (n_x,) or (batch,n_x), got {tuple(u.shape)}")
+        if u_b.shape[1] != n_x:
+            raise ValueError(f"{name} width must be {n_x}, got {u_b.shape[1]}")
+        return u_b.unsqueeze(1), squeeze
+
+    if u.dim() == 2:
+        if u.shape != (state_channels, n_x):
+            raise ValueError(
+                f"{name} must have shape ({state_channels},{n_x}) or "
+                f"(batch,{state_channels},{n_x}), got {tuple(u.shape)}"
+            )
+        return u.unsqueeze(0), True
+    if u.dim() == 3:
+        if u.shape[1:] != (state_channels, n_x):
+            raise ValueError(
+                f"{name} must have shape (batch,{state_channels},{n_x}), got {tuple(u.shape)}"
+            )
+        return u, False
+    raise ValueError(
+        f"{name} must have shape ({state_channels},{n_x}) or "
+        f"(batch,{state_channels},{n_x}), got {tuple(u.shape)}"
+    )
+
+
 class ResidualConvBlock1D(nn.Module):
     def __init__(self, channels: int, kernel_size: int = 5, padding_mode: str = "zeros"):
         super().__init__()
@@ -95,14 +133,18 @@ class VariationalStateEncoder1D(nn.Module):
         kernel_size: int = 5,
         use_grad_features: bool = True,
         boundary_condition: str = "periodic",
+        state_channels: int = 1,
     ):
         super().__init__()
         self.n_x = int(n_x)
         self.latent_channels = int(latent_channels)
+        self.state_channels = int(state_channels)
+        if self.state_channels < 1:
+            raise ValueError("state_channels must be >= 1")
         self.use_grad_features = bool(use_grad_features)
         self.padding_mode = _padding_mode_1d(boundary_condition)
 
-        in_channels = 2 if self.use_grad_features else 1
+        in_channels = (2 if self.use_grad_features else 1) * self.state_channels
         self.padding = kernel_size // 2
         self.in_proj = nn.Conv1d(in_channels, hidden_channels, kernel_size=kernel_size)
         self.blocks = nn.ModuleList(
@@ -116,23 +158,21 @@ class VariationalStateEncoder1D(nn.Module):
         self.act = nn.GELU()
 
     def _grad_feat(self, u: torch.Tensor) -> torch.Tensor:
-        u_pad = _pad_1d(u.unsqueeze(1), 1, self.padding_mode).squeeze(1)
-        return 0.5 * (u_pad[:, 2:] - u_pad[:, :-2])
+        u_pad = _pad_1d(u, 1, self.padding_mode)
+        return 0.5 * (u_pad[:, :, 2:] - u_pad[:, :, :-2])
 
     def forward(self, u: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        squeeze = False
-        if u.dim() == 1:
-            u = u.unsqueeze(0)
-            squeeze = True
-        if u.dim() != 2:
-            raise ValueError(f"u must have shape (n_x,) or (batch,n_x), got {tuple(u.shape)}")
-        if u.shape[1] != self.n_x:
-            raise ValueError(f"u width must be {self.n_x}, got {u.shape[1]}")
+        u_b, squeeze = _ensure_batch_channel_state_1d(
+            u,
+            name="u",
+            state_channels=self.state_channels,
+            n_x=self.n_x,
+        )
 
         if self.use_grad_features:
-            x = torch.stack([u, self._grad_feat(u)], dim=1)
+            x = torch.cat([u_b, self._grad_feat(u_b)], dim=1)
         else:
-            x = u.unsqueeze(1)
+            x = u_b
 
         h = self.act(self.in_proj(_pad_1d(x, self.padding, self.padding_mode)))
         for block in self.blocks:
@@ -157,10 +197,14 @@ class StateDecoder1D(nn.Module):
         n_blocks: int = 4,
         kernel_size: int = 5,
         boundary_condition: str = "periodic",
+        state_channels: int = 1,
     ):
         super().__init__()
         self.n_x = int(n_x)
         self.latent_channels = int(latent_channels)
+        self.state_channels = int(state_channels)
+        if self.state_channels < 1:
+            raise ValueError("state_channels must be >= 1")
         self.padding_mode = _padding_mode_1d(boundary_condition)
         self.padding = kernel_size // 2
 
@@ -171,7 +215,7 @@ class StateDecoder1D(nn.Module):
                 for _ in range(n_blocks)
             ]
         )
-        self.out_proj = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+        self.out_proj = nn.Conv1d(hidden_channels, self.state_channels, kernel_size=1)
         self.act = nn.GELU()
 
     def forward(self, z: torch.Tensor, f: torch.Tensor | None = None) -> torch.Tensor:
@@ -187,7 +231,12 @@ class StateDecoder1D(nn.Module):
         h = self.act(self.in_proj(_pad_1d(z, self.padding, self.padding_mode)))
         for block in self.blocks:
             h = self.act(block(h))
-        u = self.out_proj(h).squeeze(1)
+        u = self.out_proj(h)
+        if self.state_channels == 1:
+            u = u.squeeze(1)
+            if squeeze:
+                return u.squeeze(0)
+            return u
         if squeeze:
             return u.squeeze(0)
         return u

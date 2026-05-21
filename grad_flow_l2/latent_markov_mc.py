@@ -15,6 +15,491 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _to_interior_forcing_1d(f: torch.Tensor, n_x: int) -> torch.Tensor:
+    if f.dim() == 1:
+        if f.shape[0] == n_x:
+            return f.unsqueeze(0)
+        if f.shape[0] == n_x + 2:
+            return f[1:-1].unsqueeze(0)
+        raise ValueError(f"forcing width must be {n_x} or {n_x + 2}, got {f.shape[0]}")
+    if f.dim() == 2:
+        if f.shape[1] == n_x:
+            return f
+        if f.shape[1] == n_x + 2:
+            return f[:, 1:-1]
+        raise ValueError(f"forcing width must be {n_x} or {n_x + 2}, got {f.shape[1]}")
+    raise ValueError("forcing must have shape (n_x,), (n_x+2,), (batch,n_x), or (batch,n_x+2)")
+
+
+def _grid_coordinates_1d(n_x: int, boundary_condition: str, device, dtype) -> torch.Tensor:
+    bc = _normalize_boundary_condition(boundary_condition)
+    if bc == "periodic":
+        return torch.arange(n_x, device=device, dtype=dtype) / float(n_x)
+    return (torch.arange(n_x, device=device, dtype=dtype) + 1.0) / float(n_x + 1)
+
+
+def _pad_1d(x: torch.Tensor, padding: int, padding_mode: str) -> torch.Tensor:
+    if padding <= 0:
+        return x
+    if padding_mode == "zeros":
+        return F.pad(x, (padding, padding), mode="constant", value=0.0)
+    return F.pad(x, (padding, padding), mode=padding_mode)
+
+
+def _ensure_batch_state_1d(u: torch.Tensor, name: str) -> tuple[torch.Tensor, bool]:
+    if u.dim() == 1:
+        return u.unsqueeze(0), True
+    if u.dim() == 2:
+        return u, False
+    raise ValueError(f"{name} must have shape (n_x,) or (batch,n_x), got {tuple(u.shape)}")
+
+
+def _ensure_batch_channel_state_1d(
+    u: torch.Tensor,
+    name: str,
+    state_channels: int,
+    n_x: int,
+) -> tuple[torch.Tensor, bool]:
+    if state_channels == 1:
+        u_b, squeeze = _ensure_batch_state_1d(u, name=name)
+        if u_b.shape[1] != n_x:
+            raise ValueError(f"{name} width must be {n_x}, got {u_b.shape[1]}")
+        return u_b.unsqueeze(1), squeeze
+
+    if u.dim() == 2:
+        if u.shape != (state_channels, n_x):
+            raise ValueError(
+                f"{name} must have shape ({state_channels},{n_x}) or "
+                f"(batch,{state_channels},{n_x}), got {tuple(u.shape)}"
+            )
+        return u.unsqueeze(0), True
+    if u.dim() == 3:
+        if u.shape[1:] != (state_channels, n_x):
+            raise ValueError(
+                f"{name} must have shape (batch,{state_channels},{n_x}), got {tuple(u.shape)}"
+            )
+        return u, False
+    raise ValueError(
+        f"{name} must have shape ({state_channels},{n_x}) or "
+        f"(batch,{state_channels},{n_x}), got {tuple(u.shape)}"
+    )
+
+
+class ResidualConvBlock1D(nn.Module):
+    def __init__(self, channels: int, kernel_size: int = 5, padding_mode: str = "zeros"):
+        super().__init__()
+        self.padding = kernel_size // 2
+        self.padding_mode = padding_mode
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size=kernel_size)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size=kernel_size)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.act(self.conv1(_pad_1d(x, self.padding, self.padding_mode)))
+        y = self.conv2(_pad_1d(y, self.padding, self.padding_mode))
+        return x + y
+
+
+class StateEncoder1D(nn.Module):
+    """Encode 1D scalar or multichannel state u -> latent field z."""
+
+    def __init__(
+        self,
+        n_x: int,
+        latent_channels: int = 16,
+        hidden_channels: int = 64,
+        n_blocks: int = 4,
+        kernel_size: int = 5,
+        use_grad_features: bool = True,
+        boundary_condition: str = "periodic",
+        state_channels: int = 1,
+    ):
+        super().__init__()
+        self.n_x = int(n_x)
+        self.latent_channels = int(latent_channels)
+        self.state_channels = int(state_channels)
+        if self.state_channels < 1:
+            raise ValueError("state_channels must be >= 1")
+        self.use_grad_features = bool(use_grad_features)
+        self.boundary_condition = _normalize_boundary_condition(boundary_condition)
+        self.padding_mode = _padding_mode_from_boundary_condition(self.boundary_condition)
+        self.padding = kernel_size // 2
+
+        in_channels = (2 if self.use_grad_features else 1) * self.state_channels
+        self.in_proj = nn.Conv1d(in_channels, hidden_channels, kernel_size=kernel_size)
+        self.blocks = nn.ModuleList(
+            [
+                ResidualConvBlock1D(hidden_channels, kernel_size=kernel_size, padding_mode=self.padding_mode)
+                for _ in range(n_blocks)
+            ]
+        )
+        self.out_proj = nn.Conv1d(hidden_channels, latent_channels, kernel_size=1)
+        self.act = nn.GELU()
+
+    def _grad_feat(self, u: torch.Tensor) -> torch.Tensor:
+        u_pad = _pad_1d(u, 1, self.padding_mode)
+        return 0.5 * (u_pad[:, :, 2:] - u_pad[:, :, :-2])
+
+    def forward(self, u: torch.Tensor) -> torch.Tensor:
+        u_b, squeeze = _ensure_batch_channel_state_1d(
+            u,
+            name="u",
+            state_channels=self.state_channels,
+            n_x=self.n_x,
+        )
+
+        if self.use_grad_features:
+            x = torch.cat([u_b, self._grad_feat(u_b)], dim=1)
+        else:
+            x = u_b
+
+        h = self.act(self.in_proj(_pad_1d(x, self.padding, self.padding_mode)))
+        for block in self.blocks:
+            h = self.act(block(h))
+        z = self.out_proj(h)
+        if squeeze:
+            return z.squeeze(0)
+        return z
+
+
+class StateDecoder1D(nn.Module):
+    """Decode a 1D latent field back to scalar or multichannel physical state."""
+
+    def __init__(
+        self,
+        n_x: int,
+        latent_channels: int = 16,
+        hidden_channels: int = 64,
+        n_blocks: int = 4,
+        kernel_size: int = 5,
+        boundary_condition: str = "periodic",
+        state_channels: int = 1,
+    ):
+        super().__init__()
+        self.n_x = int(n_x)
+        self.latent_channels = int(latent_channels)
+        self.state_channels = int(state_channels)
+        if self.state_channels < 1:
+            raise ValueError("state_channels must be >= 1")
+        self.boundary_condition = _normalize_boundary_condition(boundary_condition)
+        self.padding_mode = _padding_mode_from_boundary_condition(self.boundary_condition)
+        self.padding = kernel_size // 2
+
+        self.in_proj = nn.Conv1d(latent_channels, hidden_channels, kernel_size=kernel_size)
+        self.blocks = nn.ModuleList(
+            [
+                ResidualConvBlock1D(hidden_channels, kernel_size=kernel_size, padding_mode=self.padding_mode)
+                for _ in range(n_blocks)
+            ]
+        )
+        self.out_proj = nn.Conv1d(hidden_channels, self.state_channels, kernel_size=1)
+        self.act = nn.GELU()
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        squeeze = False
+        if z.dim() == 2:
+            z = z.unsqueeze(0)
+            squeeze = True
+        if z.dim() != 3:
+            raise ValueError(
+                f"z must have shape (latent_channels,n_x) or (batch,latent_channels,n_x), got {tuple(z.shape)}"
+            )
+        if z.shape[1] != self.latent_channels:
+            raise ValueError(f"Expected latent_channels={self.latent_channels}, got {z.shape[1]}")
+        if z.shape[2] != self.n_x:
+            raise ValueError(f"z width must be {self.n_x}, got {z.shape[2]}")
+
+        h = self.act(self.in_proj(_pad_1d(z, self.padding, self.padding_mode)))
+        for block in self.blocks:
+            h = self.act(block(h))
+        u = self.out_proj(h)
+        if self.state_channels == 1:
+            u = u.squeeze(1)
+            if squeeze:
+                return u.squeeze(0)
+            return u
+        if squeeze:
+            return u.squeeze(0)
+        return u
+
+
+class ProximalStepSimulator1D(nn.Module):
+    """CNN latent step simulator for 1D latent fields."""
+
+    def __init__(
+        self,
+        n_x: int,
+        latent_channels: int = 16,
+        hidden_channels: int = 64,
+        n_blocks: int = 6,
+        kernel_size: int = 5,
+        use_forcing_channel: bool = True,
+        use_dt_channel: bool = False,
+        default_dt: Optional[float] = None,
+        boundary_condition: str = "periodic",
+    ):
+        super().__init__()
+        self.n_x = int(n_x)
+        self.latent_channels = int(latent_channels)
+        self.use_forcing_channel = bool(use_forcing_channel)
+        self.use_dt_channel = bool(use_dt_channel)
+        self.default_dt = default_dt
+        self.boundary_condition = _normalize_boundary_condition(boundary_condition)
+        self.padding_mode = _padding_mode_from_boundary_condition(self.boundary_condition)
+        self.padding = kernel_size // 2
+
+        in_channels = latent_channels + (1 if use_forcing_channel else 0) + (1 if use_dt_channel else 0)
+        self.in_proj = nn.Conv1d(in_channels, hidden_channels, kernel_size=kernel_size)
+        self.blocks = nn.ModuleList(
+            [
+                ResidualConvBlock1D(hidden_channels, kernel_size=kernel_size, padding_mode=self.padding_mode)
+                for _ in range(n_blocks)
+            ]
+        )
+        self.out_proj = nn.Conv1d(hidden_channels, latent_channels, kernel_size=kernel_size)
+        self.act = nn.GELU()
+
+        nn.init.zeros_(self.out_proj.bias)
+        nn.init.normal_(self.out_proj.weight, std=0.01)
+
+    def _dt_channel(self, batch_size: int, dt, device, dtype) -> torch.Tensor:
+        if dt is None:
+            if self.default_dt is None:
+                raise ValueError("dt must be provided when use_dt_channel=True and default_dt is None")
+            dt_value = self.default_dt
+        else:
+            dt_value = dt
+
+        if torch.is_tensor(dt_value):
+            if dt_value.dim() == 0:
+                dt_ch = dt_value.to(device=device, dtype=dtype).expand(batch_size, self.n_x)
+            elif dt_value.dim() == 1 and dt_value.shape[0] == batch_size:
+                dt_ch = dt_value.to(device=device, dtype=dtype).view(batch_size, 1).expand(batch_size, self.n_x)
+            else:
+                raise ValueError("dt tensor must be scalar or shape (batch,)")
+        else:
+            dt_ch = torch.full((batch_size, self.n_x), float(dt_value), device=device, dtype=dtype)
+        return dt_ch.unsqueeze(1)
+
+    def forward(self, z_k: torch.Tensor, f: torch.Tensor, dt=None) -> torch.Tensor:
+        squeeze = False
+        if z_k.dim() == 2:
+            z_k = z_k.unsqueeze(0)
+            f = f.unsqueeze(0)
+            squeeze = True
+        if z_k.dim() != 3:
+            raise ValueError(f"z_k must have shape (latent_channels,n_x) or (batch,latent_channels,n_x), got {tuple(z_k.shape)}")
+        if z_k.shape[1] != self.latent_channels:
+            raise ValueError(f"Expected latent_channels={self.latent_channels}, got {z_k.shape[1]}")
+        if z_k.shape[2] != self.n_x:
+            raise ValueError(f"z_k width must be {self.n_x}, got {z_k.shape[2]}")
+
+        batch_size = z_k.shape[0]
+        feat = [z_k]
+        if self.use_forcing_channel:
+            f_int = _to_interior_forcing_1d(f, n_x=self.n_x)
+            if f_int.shape[0] == 1 and batch_size > 1:
+                f_int = f_int.expand(batch_size, -1)
+            if f_int.shape[0] != batch_size:
+                raise ValueError("forcing batch size must match z batch size or be 1")
+            feat.append(f_int.unsqueeze(1))
+        if self.use_dt_channel:
+            feat.append(self._dt_channel(batch_size, dt, z_k.device, z_k.dtype))
+
+        h = self.act(self.in_proj(_pad_1d(torch.cat(feat, dim=1), self.padding, self.padding_mode)))
+        for block in self.blocks:
+            h = self.act(block(h))
+        delta = self.out_proj(_pad_1d(h, self.padding, self.padding_mode))
+        z_next = z_k + delta
+        if squeeze:
+            return z_next.squeeze(0)
+        return z_next
+
+
+class SpectralConv1d(nn.Module):
+    """1D Fourier layer retaining a fixed number of low positive-frequency modes."""
+
+    def __init__(self, in_channels: int, out_channels: int, modes: int):
+        super().__init__()
+        if modes <= 0:
+            raise ValueError("modes must be positive")
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+        self.modes = int(modes)
+        scale = 1.0 / max(1, in_channels * out_channels)
+        self.weight = nn.Parameter(scale * torch.randn(in_channels, out_channels, self.modes, 2))
+
+    @staticmethod
+    def _compl_mul1d(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        return torch.einsum("bim,iom->bom", x, w)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 3:
+            raise ValueError(f"x must have shape (batch,channels,n_x), got {tuple(x.shape)}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Expected in_channels={self.in_channels}, got {x.shape[1]}")
+
+        batch_size, _, n_x = x.shape
+        x_ft = torch.fft.rfft(x, dim=-1)
+        max_modes = min(self.modes, x_ft.shape[-1])
+        out_ft = torch.zeros(batch_size, self.out_channels, x_ft.shape[-1], dtype=x_ft.dtype, device=x.device)
+        weight = torch.view_as_complex(self.weight[:, :, :max_modes, :].contiguous())
+        out_ft[:, :, :max_modes] = self._compl_mul1d(x_ft[:, :, :max_modes], weight)
+        return torch.fft.irfft(out_ft, n=n_x, dim=-1)
+
+
+class FNOBlock1D(nn.Module):
+    def __init__(self, width: int, modes: int):
+        super().__init__()
+        self.spectral = SpectralConv1d(width, width, modes=modes)
+        self.local = nn.Conv1d(width, width, kernel_size=1)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.spectral(x) + self.local(x))
+
+
+class FNOProximalStepSimulator1D(nn.Module):
+    """FNO latent step simulator for 1D latent fields."""
+
+    def __init__(
+        self,
+        n_x: int,
+        latent_channels: int = 16,
+        width: int = 64,
+        n_layers: int = 6,
+        modes: int = 16,
+        use_forcing_channel: bool = True,
+        use_dt_channel: bool = False,
+        use_grid_features: bool = True,
+        default_dt: Optional[float] = None,
+        boundary_condition: str = "periodic",
+    ):
+        super().__init__()
+        self.n_x = int(n_x)
+        self.latent_channels = int(latent_channels)
+        self.use_forcing_channel = bool(use_forcing_channel)
+        self.use_dt_channel = bool(use_dt_channel)
+        self.use_grid_features = bool(use_grid_features)
+        self.default_dt = default_dt
+        self.boundary_condition = _normalize_boundary_condition(boundary_condition)
+
+        in_channels = (
+            self.latent_channels
+            + (1 if self.use_forcing_channel else 0)
+            + (1 if self.use_dt_channel else 0)
+            + (1 if self.use_grid_features else 0)
+        )
+        self.in_proj = nn.Conv1d(in_channels, width, kernel_size=1)
+        self.blocks = nn.ModuleList([FNOBlock1D(width, modes=modes) for _ in range(n_layers)])
+        self.out_proj = nn.Conv1d(width, self.latent_channels, kernel_size=1)
+
+        nn.init.zeros_(self.out_proj.bias)
+        nn.init.normal_(self.out_proj.weight, std=0.01)
+
+    def _dt_channel(self, batch_size: int, dt, device, dtype) -> torch.Tensor:
+        if dt is None:
+            if self.default_dt is None:
+                raise ValueError("dt must be provided when use_dt_channel=True and default_dt is None")
+            dt_value = self.default_dt
+        else:
+            dt_value = dt
+
+        if torch.is_tensor(dt_value):
+            if dt_value.dim() == 0:
+                dt_ch = dt_value.to(device=device, dtype=dtype).expand(batch_size, self.n_x)
+            elif dt_value.dim() == 1 and dt_value.shape[0] == batch_size:
+                dt_ch = dt_value.to(device=device, dtype=dtype).view(batch_size, 1).expand(batch_size, self.n_x)
+            else:
+                raise ValueError("dt tensor must be scalar or shape (batch,)")
+        else:
+            dt_ch = torch.full((batch_size, self.n_x), float(dt_value), device=device, dtype=dtype)
+        return dt_ch.unsqueeze(1)
+
+    def _grid_features(self, batch_size: int, device, dtype) -> torch.Tensor:
+        x = _grid_coordinates_1d(
+            n_x=self.n_x,
+            boundary_condition=self.boundary_condition,
+            device=device,
+            dtype=dtype,
+        )
+        return x.view(1, 1, self.n_x).expand(batch_size, -1, -1)
+
+    def forward(self, z_k: torch.Tensor, f: torch.Tensor, dt=None) -> torch.Tensor:
+        squeeze = False
+        if z_k.dim() == 2:
+            z_k = z_k.unsqueeze(0)
+            f = f.unsqueeze(0)
+            squeeze = True
+        if z_k.dim() != 3:
+            raise ValueError(f"z_k must have shape (latent_channels,n_x) or (batch,latent_channels,n_x), got {tuple(z_k.shape)}")
+        if z_k.shape[1] != self.latent_channels:
+            raise ValueError(f"Expected latent_channels={self.latent_channels}, got {z_k.shape[1]}")
+        if z_k.shape[2] != self.n_x:
+            raise ValueError(f"z_k width must be {self.n_x}, got {z_k.shape[2]}")
+
+        batch_size = z_k.shape[0]
+        feat = [z_k]
+        if self.use_forcing_channel:
+            f_int = _to_interior_forcing_1d(f, n_x=self.n_x)
+            if f_int.shape[0] == 1 and batch_size > 1:
+                f_int = f_int.expand(batch_size, -1)
+            if f_int.shape[0] != batch_size:
+                raise ValueError("forcing batch size must match z batch size or be 1")
+            feat.append(f_int.unsqueeze(1))
+        if self.use_dt_channel:
+            feat.append(self._dt_channel(batch_size, dt, z_k.device, z_k.dtype))
+        if self.use_grid_features:
+            feat.append(self._grid_features(batch_size, z_k.device, z_k.dtype))
+
+        h = self.in_proj(torch.cat(feat, dim=1))
+        for block in self.blocks:
+            h = block(h)
+        z_next = z_k + self.out_proj(h)
+        if squeeze:
+            return z_next.squeeze(0)
+        return z_next
+
+
+class LatentMarkovModel1D(nn.Module):
+    """Hidden-space 1D latent Markov model for scalar or multichannel states."""
+
+    def __init__(
+        self,
+        encoder: StateEncoder1D,
+        decoder: StateDecoder1D,
+        transition: nn.Module,
+    ):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.prox_step = transition
+
+    @property
+    def has_energy_head(self) -> bool:
+        return False
+
+    def encode(self, u: torch.Tensor) -> torch.Tensor:
+        return self.encoder(u)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return self.decoder(z)
+
+    def predict_latent_step(self, z_k: torch.Tensor, f: torch.Tensor, dt=None) -> torch.Tensor:
+        return self.prox_step(z_k, f, dt=dt)
+
+    def predict_step(self, u_k: torch.Tensor, f: torch.Tensor, dt=None, return_latent: bool = False):
+        z_k = self.encode(u_k)
+        z_next = self.predict_latent_step(z_k, f, dt=dt)
+        u_next = self.decode(z_next)
+        if return_latent:
+            return u_next, z_k, z_next
+        return u_next
+
+    def forward(self, u_k: torch.Tensor, f: torch.Tensor, dt=None) -> torch.Tensor:
+        return self.predict_step(u_k, f, dt=dt, return_latent=False)
+
+
 def _to_interior_forcing_2d(f: torch.Tensor, n_x: int, n_y: int) -> torch.Tensor:
     if f.dim() == 2:
         if f.shape == (n_x, n_y):
@@ -648,6 +1133,14 @@ class LatentMarkovModel2D(nn.Module):
 
 
 __all__ = [
+    "ResidualConvBlock1D",
+    "StateEncoder1D",
+    "StateDecoder1D",
+    "ProximalStepSimulator1D",
+    "SpectralConv1d",
+    "FNOBlock1D",
+    "FNOProximalStepSimulator1D",
+    "LatentMarkovModel1D",
     "ResidualConvBlock2D",
     "StateEncoder2D",
     "StateDecoder2D",

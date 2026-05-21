@@ -21,6 +21,7 @@ try:
         _torch_load_checkpoint,
         _channel_weights_from_args_or_checkpoint,
         _resolve_delta_clip,
+        _truncate_split_for_eval,
     )
     from ..heat_data import load_dataset_splits
     from ..cfd2d.train_vae import LatentVAETrainer2D, _rollout_vae_mean
@@ -36,6 +37,7 @@ except ImportError:
         _torch_load_checkpoint,
         _channel_weights_from_args_or_checkpoint,
         _resolve_delta_clip,
+        _truncate_split_for_eval,
     )
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.cfd2d.train_vae import LatentVAETrainer2D, _rollout_vae_mean
@@ -61,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers",    type=int, default=0)
     parser.add_argument("--n-plot-samples", type=int,   default=4)
     parser.add_argument("--snapshot-times", type=str,   default="")
+    parser.add_argument("--max-snapshots",  type=int,   default=None,
+                        help="Maximum trajectory snapshots to evaluate. Default: 61 for OOD datasets (T=60), otherwise all.")
     parser.add_argument("--delta-clip",     type=float, default=None,
                         help="Clip predicted increment per step. Default: checkpoint training value; set 0 to disable.")
     parser.add_argument("--cpu",            action="store_true")
@@ -79,11 +83,14 @@ def main(args: argparse.Namespace) -> None:
     if int(split["u0"].shape[0]) == 0:
         raise ValueError(f"Requested split {args.split!r} is empty")
     meta   = splits.get("meta", {})
+    original_n_steps = int(split["u_traj"].shape[1] - 1)
+    original_t_final = float(meta.get("t_final", float(original_n_steps)))
+    dt = original_t_final / float(original_n_steps)
+    split, eval_snapshots = _truncate_split_for_eval(split, args.dataset_path, args.max_snapshots)
     n_x    = int(split["u0"].shape[-2])
     n_y    = int(split["u0"].shape[-1])
     n_steps = int(split["u_traj"].shape[1] - 1)
-    t_final = float(meta.get("t_final", float(n_steps)))
-    dt      = t_final / float(n_steps)
+    t_final = dt * float(n_steps)
     area    = 1.0 / float(n_x * n_y)
 
     model = _build_model(n_x=n_x, n_y=n_y, dt=dt, args=train_args).to(device)
@@ -113,19 +120,29 @@ def main(args: argparse.Namespace) -> None:
     metrics = trainer.validate(step_loader, traj_loader=None)
     curves  = _evaluate_rollout_curves(model, traj_loader, device=device, dt=dt, area=area,
                                         delta_clip=delta_clip, rollout_fn=_rollout_vae_mean)
-    metrics["rollout_rel_l2"]        = curves["rollout_rel_mean"]
+    metrics["rollout_rel_l2"] = curves["rollout_rel_mean"]
     metrics["rollout_rel_l2_median"] = curves["rollout_rel_median"]
+    metrics["rollout_rel_h1"] = curves["rollout_rel_h1_mean"]
+    metrics["rollout_rel_h1_median"] = curves["rollout_rel_h1_median"]
     for c, name in enumerate(CHANNEL_NAMES):
         metrics[f"rollout_rel_l2_{name}"] = float(curves["rel_curve_mean"][:, c].mean())
+        metrics[f"rollout_rel_h1_{name}"] = float(curves["rel_h1_curve_mean"][:, c].mean())
 
     print(f"Device: {device}")
     print(f"Split: {args.split}, n={int(split['u0'].shape[0])}, grid=({n_x},{n_y}), steps={n_steps}, dt={dt:.6f}")
+    print(f"Evaluation snapshots: {eval_snapshots} / {original_n_steps + 1}")
     print(f"delta_clip: {delta_clip}")
     print("Step metrics:", {k: v for k, v in metrics.items() if "rollout" not in k})
     print("Rollout rel L2 per channel:")
     for c, name in enumerate(CHANNEL_NAMES):
         print(f"  {name}: {metrics[f'rollout_rel_l2_{name}']:.4f}")
     print(f"  mean:  {metrics['rollout_rel_l2']:.4f}")
+    print("Rollout rel H1 per channel:")
+    for c, name in enumerate(CHANNEL_NAMES):
+        print(f"  {name}: {metrics[f'rollout_rel_h1_{name}']:.4f}")
+    print(f"  mean:  {metrics['rollout_rel_h1']:.4f}")
+    print(f"Overall relative L2 across time: {curves['overall_rel_l2']:.8e}")
+    print(f"Overall relative H1 across time: {curves['overall_rel_h1']:.8e}")
     _save_curve_csv(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.csv"))
     _plot_curve(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png"))
     _plot_samples(model, split, device, dt, t_final,
@@ -133,6 +150,30 @@ def main(args: argparse.Namespace) -> None:
                   args.n_plot_samples,
                   os.path.join(args.output_dir, f"{args.split}_sample_comparisons"),
                   delta_clip=delta_clip, rollout_fn=_rollout_vae_mean)
+
+    summary = {
+        "dataset_path": args.dataset_path,
+        "checkpoint_path": args.checkpoint,
+        "split": args.split,
+        "n_x": n_x,
+        "n_y": n_y,
+        "n_steps": n_steps,
+        "dt": dt,
+        "evaluation_snapshots": eval_snapshots,
+        "stored_snapshots": original_n_steps + 1,
+        "delta_clip": delta_clip,
+        "metrics": metrics,
+        "overall_rel_l2": curves["overall_rel_l2"],
+        "overall_rel_h1": curves["overall_rel_h1"],
+        "rel_l2_curve_mean": curves["rel_curve_mean"].tolist(),
+        "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
+        "channel_names": CHANNEL_NAMES,
+        "meta": meta,
+    }
+    summary_path = os.path.join(args.output_dir, f"{args.split}_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Saved evaluation summary: {summary_path}")
 
 
 if __name__ == "__main__":

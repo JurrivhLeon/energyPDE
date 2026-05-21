@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers",     type=int, default=0)
     parser.add_argument("--n-plot-samples",  type=int,   default=4)
     parser.add_argument("--snapshot-times",  type=str,   default="")
+    parser.add_argument("--max-snapshots",   type=int,   default=None,
+                        help="Maximum trajectory snapshots to evaluate. Default: 61 for OOD datasets (T=60), otherwise all.")
     parser.add_argument("--delta-clip",      type=float, default=None,
                         help="Clip predicted increment per step. Default: checkpoint training value; set 0 to disable.")
     parser.add_argument("--cpu",             action="store_true")
@@ -80,13 +82,43 @@ def _resolve_delta_clip(cli_value: Optional[float], checkpoint, default: Optiona
     return None if value is None or float(value) <= 0.0 else float(value)
 
 
+def _truncate_split_for_eval(split: Dict[str, torch.Tensor], dataset_path: str,
+                             max_snapshots: Optional[int]) -> tuple[Dict[str, torch.Tensor], int]:
+    if max_snapshots is None:
+        max_snapshots = 61 if "ood" in os.path.basename(dataset_path).lower() else 0
+    max_snapshots = int(max_snapshots)
+    available = int(split["u_traj"].shape[1])
+    if max_snapshots <= 0 or max_snapshots >= available:
+        return split, available
+    if max_snapshots < 2:
+        raise ValueError("max_snapshots must be >= 2 when enabled")
+    truncated = dict(split)
+    truncated["u_traj"] = split["u_traj"][:, :max_snapshots]
+    truncated["u0"] = truncated["u_traj"][:, 0].clone()
+    return truncated, max_snapshots
+
+
+def _spectral_h1_squared_per_channel_2d(u: torch.Tensor) -> torch.Tensor:
+    """Return spatial H1 squared norms with shape matching u[..., channel]."""
+    n_x = int(u.shape[-2])
+    n_y = int(u.shape[-1])
+    u_hat = torch.fft.fft2(u, dim=(-2, -1), norm="ortho")
+    real_dtype = u.real.dtype
+    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u.device).to(dtype=real_dtype)
+    ky = 2.0 * torch.pi * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u.device).to(dtype=real_dtype)
+    kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
+    weight = 1.0 + kx_grid.square() + ky_grid.square()
+    power = u_hat.real.square() + u_hat.imag.square()
+    return torch.sum(power * weight, dim=(-2, -1))
+
+
 @torch.no_grad()
 def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
                                dt: float, area: float,
                                delta_clip: Optional[float] = None,
                                rollout_fn: Callable = rollout_latent_markov_2d) -> Dict[str, np.ndarray]:
     """
-    Compute per-channel rollout relative L2 error curves.
+    Compute per-channel rollout relative L2 and H1 error curves.
 
     Returns
     -------
@@ -96,6 +128,11 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
     rollout_rel_median : float   – median equivalent
     """
     rel_batches = []
+    rel_h1_batches = []
+    l2_diff_sq_sum = torch.zeros((), device=device)
+    l2_ref_sq_sum = torch.zeros((), device=device)
+    h1_diff_sq_sum = torch.zeros((), device=device)
+    h1_ref_sq_sum = torch.zeros((), device=device)
     for batch in traj_loader:
         u0    = batch["u0"].to(device)
         f     = batch["f"].to(device)
@@ -108,37 +145,57 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
         num = torch.sqrt(float(area) * diff.pow(2).sum(dim=(-2, -1)))   # (B, T+1, C)
         den = torch.sqrt(float(area) * u_ref.pow(2).sum(dim=(-2, -1))) # (B, T+1, C)
         rel_batches.append((num / (den + 1e-8)).detach().cpu())
+        h1_diff_sq = _spectral_h1_squared_per_channel_2d(diff)
+        h1_ref_sq = _spectral_h1_squared_per_channel_2d(u_ref)
+        rel_h1_batches.append(torch.sqrt(h1_diff_sq / (h1_ref_sq + 1e-12)).detach().cpu())
+        l2_diff_sq_sum += float(area) * torch.sum(diff.square())
+        l2_ref_sq_sum += float(area) * torch.sum(u_ref.square())
+        h1_diff_sq_sum += torch.sum(h1_diff_sq)
+        h1_ref_sq_sum += torch.sum(h1_ref_sq)
 
     rel = torch.cat(rel_batches, dim=0)                 # (N, T+1, C)
-    rel_mean   = torch.nanmean(rel, dim=0).numpy().astype(np.float64)          # (T+1, C)
-    rel_median = np.nanmedian(rel.numpy(), axis=0).astype(np.float64)          # (T+1, C)
-    # Aggregate: mean over channels, then mean/median over samples and time
-    rel_all = rel.mean(dim=2)                           # (N, T+1)
+    rel_h1 = torch.cat(rel_h1_batches, dim=0)           # (N, T+1, C)
+    rel_mean = torch.nanmean(rel, dim=0).numpy().astype(np.float64)
+    rel_median = np.nanmedian(rel.numpy(), axis=0).astype(np.float64)
+    rel_h1_mean = torch.nanmean(rel_h1, dim=0).numpy().astype(np.float64)
+    rel_h1_median = np.nanmedian(rel_h1.numpy(), axis=0).astype(np.float64)
     return {
-        "rel_curve_mean":     rel_mean,                 # (T+1, C)
-        "rel_curve_median":   rel_median,               # (T+1, C)
-        "rollout_rel_mean":   float(np.nanmean(rel_mean)),
+        "rel_curve_mean": rel_mean,
+        "rel_curve_median": rel_median,
+        "rel_h1_curve_mean": rel_h1_mean,
+        "rel_h1_curve_median": rel_h1_median,
+        "rollout_rel_mean": float(np.nanmean(rel_mean)),
         "rollout_rel_median": float(np.nanmedian(rel_median)),
+        "rollout_rel_h1_mean": float(np.nanmean(rel_h1_mean)),
+        "rollout_rel_h1_median": float(np.nanmedian(rel_h1_median)),
+        "overall_rel_l2": float(torch.sqrt(l2_diff_sq_sum / (l2_ref_sq_sum + 1e-12)).item()),
+        "overall_rel_h1": float(torch.sqrt(h1_diff_sq_sum / (h1_ref_sq_sum + 1e-12)).item()),
     }
 
 
 def _save_curve_csv(curves: Dict[str, np.ndarray], dt: float, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    rel_mean = curves["rel_curve_mean"]                 # (T+1, C)
-    n_steps, n_ch = rel_mean.shape
+    rel_l2_mean = curves["rel_curve_mean"]
+    rel_l2_median = curves["rel_curve_median"]
+    rel_h1_mean = curves["rel_h1_curve_mean"]
+    rel_h1_median = curves["rel_h1_curve_median"]
+    n_steps, n_ch = rel_l2_mean.shape
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         header = ["step", "time"]
-        for name in CHANNEL_NAMES:
-            header += [f"rel_l2_mean_{name}", f"rel_l2_median_{name}"]
-        header += ["rel_l2_mean_all", "rel_l2_median_all"]
+        for prefix in ("rel_l2", "rel_h1"):
+            for name in CHANNEL_NAMES:
+                header += [f"{prefix}_mean_{name}", f"{prefix}_median_{name}"]
+            header += [f"{prefix}_mean_all", f"{prefix}_median_all"]
         writer.writerow(header)
-        rel_med = curves["rel_curve_median"]            # (T+1, C)
         for k in range(n_steps):
             row = [k, f"{k * dt:.8f}"]
             for c in range(n_ch):
-                row += [rel_mean[k, c], rel_med[k, c]]
-            row += [rel_mean[k].mean(), rel_med[k].mean()]
+                row += [rel_l2_mean[k, c], rel_l2_median[k, c]]
+            row += [rel_l2_mean[k].mean(), rel_l2_median[k].mean()]
+            for c in range(n_ch):
+                row += [rel_h1_mean[k, c], rel_h1_median[k, c]]
+            row += [rel_h1_mean[k].mean(), rel_h1_median[k].mean()]
             writer.writerow(row)
 
 
@@ -146,31 +203,29 @@ def _plot_curve(curves: Dict[str, np.ndarray], dt: float, path: str) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
-        print(f"Skipping curve plot (matplotlib unavailable): {exc}"); return
+        print(f"Skipping curve plot (matplotlib unavailable): {exc}")
+        return
 
-    rel_mean   = curves["rel_curve_mean"]               # (T+1, C)
-    rel_median = curves["rel_curve_median"]             # (T+1, C)
-    T_plus1, _ = rel_mean.shape
-    t      = np.arange(T_plus1) * float(dt)
+    t = np.arange(curves["rel_curve_mean"].shape[0]) * float(dt)
     colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
-
     fig, axes = plt.subplots(1, 2, figsize=(14, 4), sharey=False)
-    for data, ax, title in [
-        (rel_mean,   axes[0], "Rollout Relative L2 — mean over samples"),
-        (rel_median, axes[1], "Rollout Relative L2 — median over samples"),
-    ]:
+    specs = (
+        (axes[0], curves["rel_curve_mean"], "relative L2", "Rollout Relative L2 Mean"),
+        (axes[1], curves["rel_h1_curve_mean"], "relative H1", "Rollout Relative H1 Mean"),
+    )
+    for ax, data, ylabel, title in specs:
         for c, (name, col) in enumerate(zip(CHANNEL_NAMES, colors)):
             ax.plot(t, data[:, c], color=col, label=name)
-        ax.plot(t, data.mean(axis=1), color="black", linestyle="--",
-                linewidth=1.5, label="all-ch mean")
+        ax.plot(t, data.mean(axis=1), color="black", linestyle="--", linewidth=1.5, label="all-ch mean")
         ax.set_title(title)
         ax.set_xlabel("time")
-        ax.set_ylabel("relative L2")
+        ax.set_ylabel(ylabel)
         ax.legend()
         ax.grid(alpha=0.3)
-
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.tight_layout(); fig.savefig(path, dpi=180); plt.close(fig)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 @torch.no_grad()
@@ -237,11 +292,14 @@ def main(args: argparse.Namespace) -> None:
     if int(split["u0"].shape[0]) == 0:
         raise ValueError(f"Requested split {args.split!r} is empty")
     meta   = splits.get("meta", {})
+    original_n_steps = int(split["u_traj"].shape[1] - 1)
+    original_t_final = float(meta.get("t_final", float(original_n_steps)))
+    dt = original_t_final / float(original_n_steps)
+    split, eval_snapshots = _truncate_split_for_eval(split, args.dataset_path, args.max_snapshots)
     n_x    = int(split["u0"].shape[-2])
     n_y    = int(split["u0"].shape[-1])
     n_steps = int(split["u_traj"].shape[1] - 1)
-    t_final = float(meta.get("t_final", float(n_steps)))
-    dt      = t_final / float(n_steps)
+    t_final = dt * float(n_steps)
     area    = 1.0 / float(n_x * n_y)
 
     model = _build_model(n_x=n_x, n_y=n_y, dt=dt, args=train_args).to(device)
@@ -263,19 +321,29 @@ def main(args: argparse.Namespace) -> None:
     metrics = trainer.validate(step_loader, traj_loader=None)
     curves  = _evaluate_rollout_curves(model, traj_loader, device=device, dt=dt, area=area,
                                         delta_clip=delta_clip)
-    metrics["rollout_rel_l2"]        = curves["rollout_rel_mean"]
+    metrics["rollout_rel_l2"] = curves["rollout_rel_mean"]
     metrics["rollout_rel_l2_median"] = curves["rollout_rel_median"]
+    metrics["rollout_rel_h1"] = curves["rollout_rel_h1_mean"]
+    metrics["rollout_rel_h1_median"] = curves["rollout_rel_h1_median"]
     for c, name in enumerate(CHANNEL_NAMES):
         metrics[f"rollout_rel_l2_{name}"] = float(curves["rel_curve_mean"][:, c].mean())
+        metrics[f"rollout_rel_h1_{name}"] = float(curves["rel_h1_curve_mean"][:, c].mean())
 
     print(f"Device: {device}")
     print(f"Split: {args.split}, n={int(split['u0'].shape[0])}, grid=({n_x},{n_y}), steps={n_steps}, dt={dt:.6f}")
+    print(f"Evaluation snapshots: {eval_snapshots} / {original_n_steps + 1}")
     print(f"delta_clip: {delta_clip}")
     print("Step metrics:", {k: v for k, v in metrics.items() if "rollout" not in k})
     print("Rollout rel L2 per channel:")
     for c, name in enumerate(CHANNEL_NAMES):
         print(f"  {name}: {metrics[f'rollout_rel_l2_{name}']:.4f}")
     print(f"  mean:  {metrics['rollout_rel_l2']:.4f}")
+    print("Rollout rel H1 per channel:")
+    for c, name in enumerate(CHANNEL_NAMES):
+        print(f"  {name}: {metrics[f'rollout_rel_h1_{name}']:.4f}")
+    print(f"  mean:  {metrics['rollout_rel_h1']:.4f}")
+    print(f"Overall relative L2 across time: {curves['overall_rel_l2']:.8e}")
+    print(f"Overall relative H1 across time: {curves['overall_rel_h1']:.8e}")
     _save_curve_csv(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.csv"))
     _plot_curve(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png"))
     _plot_samples(model, split, device, dt, t_final,
@@ -283,6 +351,30 @@ def main(args: argparse.Namespace) -> None:
                   args.n_plot_samples,
                   os.path.join(args.output_dir, f"{args.split}_sample_comparisons"),
                   delta_clip=delta_clip)
+
+    summary = {
+        "dataset_path": args.dataset_path,
+        "checkpoint_path": args.checkpoint_path,
+        "split": args.split,
+        "n_x": n_x,
+        "n_y": n_y,
+        "n_steps": n_steps,
+        "dt": dt,
+        "evaluation_snapshots": eval_snapshots,
+        "stored_snapshots": original_n_steps + 1,
+        "delta_clip": delta_clip,
+        "metrics": metrics,
+        "overall_rel_l2": curves["overall_rel_l2"],
+        "overall_rel_h1": curves["overall_rel_h1"],
+        "rel_l2_curve_mean": curves["rel_curve_mean"].tolist(),
+        "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
+        "channel_names": CHANNEL_NAMES,
+        "meta": meta,
+    }
+    summary_path = os.path.join(args.output_dir, f"{args.split}_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Saved evaluation summary: {summary_path}")
 
 
 if __name__ == "__main__":

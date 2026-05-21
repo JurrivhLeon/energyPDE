@@ -345,6 +345,8 @@ def solve_navier_stokes_vorticity_trajectory_pseudospectral(
     nu: float = 1e-3,
     solver_cache: Optional[Dict[str, torch.Tensor]] = None,
     max_step_per_record: Optional[int] = None,
+    show_progress: bool = False,
+    progress_desc: str = "pseudospectral solve",
 ) -> torch.Tensor:
     """
     Integrate periodic Navier-Stokes in vorticity form on a full periodic grid.
@@ -400,16 +402,37 @@ def solve_navier_stokes_vorticity_trajectory_pseudospectral(
     omega = project_zero_mean_2d(u0_b.to(dtype=u0_b.dtype).clone())
     states = [omega.clone()]
 
-    for _ in range(n_records):
-        for _ in range(steps_per_record):
-            omega = pseudospectral_crank_nicolson_step_periodic(
-                omega=omega,
-                dt=dt,
-                nu=nu,
-                cache=solver_cache,
-                forcing_hat=forcing_hat,
-            )
-        states.append(omega.clone())
+    total_steps = n_records * steps_per_record
+    step_iter = range(total_steps)
+    progress = None
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm  # type: ignore
+
+            progress = tqdm(step_iter, total=total_steps, desc=progress_desc, leave=False, mininterval=5.0)
+            step_iter = progress
+        except Exception:
+            progress = None
+
+    steps_since_record = 0
+    for _ in step_iter:
+        omega = pseudospectral_crank_nicolson_step_periodic(
+            omega=omega,
+            dt=dt,
+            nu=nu,
+            cache=solver_cache,
+            forcing_hat=forcing_hat,
+        )
+        steps_since_record += 1
+        if steps_since_record == steps_per_record:
+            states.append(omega.clone())
+            steps_since_record = 0
+
+    if progress is not None:
+        progress.close()
+
+    if len(states) != n_records + 1:
+        raise RuntimeError("Internal solver error: recorded an unexpected number of states")
 
     traj = torch.stack(states, dim=1)
     if squeeze:
