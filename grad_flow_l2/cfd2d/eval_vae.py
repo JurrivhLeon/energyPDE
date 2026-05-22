@@ -14,10 +14,14 @@ try:
     from ..cfd2d.cfd_data import build_cfd2d_step_dataset, build_cfd2d_trajectory_dataset_from_split
     from ..cfd2d.eval import (
         _evaluate_rollout_curves,
+        _add_rollout_std_metrics,
+        _add_rollout_max_metrics,
+        FIELD_NAMES,
         _parse_snapshot_times,
         _plot_curve,
         _plot_samples,
         _save_curve_csv,
+        _save_per_sample_errors_json,
         _torch_load_checkpoint,
         _channel_weights_from_args_or_checkpoint,
         _resolve_delta_clip,
@@ -30,10 +34,14 @@ except ImportError:
     from grad_flow_l2.cfd2d.cfd_data import build_cfd2d_step_dataset, build_cfd2d_trajectory_dataset_from_split
     from grad_flow_l2.cfd2d.eval import (
         _evaluate_rollout_curves,
+        _add_rollout_std_metrics,
+        _add_rollout_max_metrics,
+        FIELD_NAMES,
         _parse_snapshot_times,
         _plot_curve,
         _plot_samples,
         _save_curve_csv,
+        _save_per_sample_errors_json,
         _torch_load_checkpoint,
         _channel_weights_from_args_or_checkpoint,
         _resolve_delta_clip,
@@ -63,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers",    type=int, default=0)
     parser.add_argument("--n-plot-samples", type=int,   default=4)
     parser.add_argument("--snapshot-times", type=str,   default="")
-    parser.add_argument("--max-snapshots",  type=int,   default=None,
+    parser.add_argument("--max-snapshots",  type=int,   default=76,
                         help="Maximum trajectory snapshots to evaluate. Default: 61 for OOD datasets (T=60), otherwise all.")
     parser.add_argument("--delta-clip",     type=float, default=None,
                         help="Clip predicted increment per step. Default: checkpoint training value; set 0 to disable.")
@@ -125,25 +133,33 @@ def main(args: argparse.Namespace) -> None:
     metrics["rollout_rel_h1"] = curves["rollout_rel_h1_mean"]
     metrics["rollout_rel_h1_median"] = curves["rollout_rel_h1_median"]
     for c, name in enumerate(CHANNEL_NAMES):
-        metrics[f"rollout_rel_l2_{name}"] = float(curves["rel_curve_mean"][:, c].mean())
-        metrics[f"rollout_rel_h1_{name}"] = float(curves["rel_h1_curve_mean"][:, c].mean())
+        metrics[f"rollout_rel_l2_{name}"] = float(curves["rollout_rel_l2_channels"][c])
+        metrics[f"rollout_rel_h1_{name}"] = float(curves["rollout_rel_h1_channels"][c])
+    for c, name in enumerate(FIELD_NAMES):
+        metrics[f"rollout_rel_l2_{name}"] = float(curves["rollout_rel_l2_fields"][c])
+        metrics[f"rollout_rel_h1_{name}"] = float(curves["rollout_rel_h1_fields"][c])
+    _add_rollout_std_metrics(metrics, curves)
+    _add_rollout_max_metrics(metrics, curves)
 
     print(f"Device: {device}")
     print(f"Split: {args.split}, n={int(split['u0'].shape[0])}, grid=({n_x},{n_y}), steps={n_steps}, dt={dt:.6f}")
     print(f"Evaluation snapshots: {eval_snapshots} / {original_n_steps + 1}")
     print(f"delta_clip: {delta_clip}")
     print("Step metrics:", {k: v for k, v in metrics.items() if "rollout" not in k})
-    print("Rollout rel L2 per channel:")
-    for c, name in enumerate(CHANNEL_NAMES):
+    print("Rollout rel L2 per field:")
+    for name in FIELD_NAMES:
         print(f"  {name}: {metrics[f'rollout_rel_l2_{name}']:.4f}")
     print(f"  mean:  {metrics['rollout_rel_l2']:.4f}")
-    print("Rollout rel H1 per channel:")
-    for c, name in enumerate(CHANNEL_NAMES):
+    print(f"  components: vx={metrics['rollout_rel_l2_vx']:.4f}, vy={metrics['rollout_rel_l2_vy']:.4f}")
+    print("Rollout rel H1 per field:")
+    for name in FIELD_NAMES:
         print(f"  {name}: {metrics[f'rollout_rel_h1_{name}']:.4f}")
     print(f"  mean:  {metrics['rollout_rel_h1']:.4f}")
+    print(f"  components: vx={metrics['rollout_rel_h1_vx']:.4f}, vy={metrics['rollout_rel_h1_vy']:.4f}")
     print(f"Overall relative L2 across time: {curves['overall_rel_l2']:.8e}")
     print(f"Overall relative H1 across time: {curves['overall_rel_h1']:.8e}")
     _save_curve_csv(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.csv"))
+    _save_per_sample_errors_json(curves, os.path.join(args.output_dir, f"{args.split}_per_sample_errors.json"))
     _plot_curve(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png"))
     _plot_samples(model, split, device, dt, t_final,
                   _parse_snapshot_times(args.snapshot_times, t_final),
@@ -165,9 +181,14 @@ def main(args: argparse.Namespace) -> None:
         "metrics": metrics,
         "overall_rel_l2": curves["overall_rel_l2"],
         "overall_rel_h1": curves["overall_rel_h1"],
+        "overall_rel_l2_global_components": curves["overall_rel_l2_global_components"],
+        "overall_rel_h1_global_components": curves["overall_rel_h1_global_components"],
         "rel_l2_curve_mean": curves["rel_curve_mean"].tolist(),
         "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
+        "rel_l2_field_curve_mean": curves["rel_field_curve_mean"].tolist(),
+        "rel_h1_field_curve_mean": curves["rel_h1_field_curve_mean"].tolist(),
         "channel_names": CHANNEL_NAMES,
+        "field_names": FIELD_NAMES,
         "meta": meta,
     }
     summary_path = os.path.join(args.output_dir, f"{args.split}_summary.json")

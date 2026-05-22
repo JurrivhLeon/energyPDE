@@ -298,6 +298,7 @@ def generate_euler1d_dataset_splits(
     max_modes: int = 5,
     decay: float = 2.0,
     solve_batch_size: int = 32,
+    max_substeps: int = 100000,
     seed: int = 42,
     device: str = "cpu",
     dtype: torch.dtype = torch.float64,
@@ -350,6 +351,7 @@ def generate_euler1d_dataset_splits(
             domain_length=domain_length,
             cfl=cfl,
             solver_dt=solver_dt,
+            max_substeps=max_substeps,
         )
         traj = downsample_periodic_primitive(traj, target_n_x=n_x)
         chunks.append(traj.to(dtype=output_dtype).cpu())
@@ -395,6 +397,7 @@ def generate_euler1d_dataset_splits(
             "n_test": int(n_test),
             "seed": int(seed),
             "solve_batch_size": int(solve_batch_size),
+            "max_substeps": int(max_substeps),
             "device": str(device),
         },
     }
@@ -448,6 +451,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-modes", type=int, default=5)
     p.add_argument("--decay", type=float, default=2.0)
     p.add_argument("--solve-batch-size", type=int, default=32)
+    p.add_argument("--max-substeps", type=int, default=100000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--no-progress", action="store_true")
@@ -476,6 +480,7 @@ def main(args: argparse.Namespace) -> None:
         max_modes=args.max_modes,
         decay=args.decay,
         solve_batch_size=args.solve_batch_size,
+        max_substeps=args.max_substeps,
         seed=args.seed,
         device=args.device,
         dtype=torch.float64,

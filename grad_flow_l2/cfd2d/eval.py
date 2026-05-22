@@ -24,8 +24,9 @@ except ImportError:
     from grad_flow_l2.latent_markov_trainer_mc import LatentMarkovTrainer2D, rollout_latent_markov_2d
     from grad_flow_l2.cfd2d.train import _build_model   # uses latent_markov_mc
 
-# Primitive variable names: rho, vx, vy, p
+# Primitive variable names: rho, vx, vy, p. Field statistics merge vx/vy into one vector velocity field.
 CHANNEL_NAMES = ["rho", "vx", "vy", "p"]
+FIELD_NAMES = ["rho", "velocity", "p"]
 
 # vx and vy are zero-mean → symmetric diverging colormap
 # rho and p are positive-definite → sequential colormap with data-range limits
@@ -43,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers",     type=int, default=0)
     parser.add_argument("--n-plot-samples",  type=int,   default=4)
     parser.add_argument("--snapshot-times",  type=str,   default="")
-    parser.add_argument("--max-snapshots",   type=int,   default=None,
+    parser.add_argument("--max-snapshots",   type=int,   default=76,
                         help="Maximum trajectory snapshots to evaluate. Default: 61 for OOD datasets (T=60), otherwise all.")
     parser.add_argument("--delta-clip",      type=float, default=None,
                         help="Clip predicted increment per step. Default: checkpoint training value; set 0 to disable.")
@@ -112,6 +113,12 @@ def _spectral_h1_squared_per_channel_2d(u: torch.Tensor) -> torch.Tensor:
     return torch.sum(power * weight, dim=(-2, -1))
 
 
+def _merge_velocity_norms(norms: torch.Tensor) -> torch.Tensor:
+    """Merge vx/vy component norms into one vector-valued velocity norm."""
+    velocity = torch.sqrt(norms[..., 1].square() + norms[..., 2].square())
+    return torch.stack((norms[..., 0], velocity, norms[..., 3]), dim=-1)
+
+
 @torch.no_grad()
 def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
                                dt: float, area: float,
@@ -122,13 +129,29 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
 
     Returns
     -------
-    rel_curve_mean   : (T+1, C)  – mean  over samples at each step, per channel
-    rel_curve_median : (T+1, C)  – median over samples at each step, per channel
-    rollout_rel_mean   : float   – mean of per-channel means (for model selection)
-    rollout_rel_median : float   – median equivalent
+    rel_curve_mean   : (T+1, C)  - mean  over samples at each step, per channel
+    rel_curve_median : (T+1, C)  - median over samples at each step, per channel
+    rel_samples      : (N, T+1, C) - per-sample relative L2 curves
+    rel_h1_samples   : (N, T+1, C) - per-sample relative H1 curves
+    rollout_rel_mean   : float   - mean of per-channel sum-of-norms ratios
+    rollout_rel_median : float   - median sample-level channel-mean sum-of-norms ratio
     """
     rel_batches = []
     rel_h1_batches = []
+    rel_field_batches = []
+    rel_h1_field_batches = []
+    overall_rel_l2_batches = []
+    overall_rel_h1_batches = []
+    overall_rel_l2_field_batches = []
+    overall_rel_h1_field_batches = []
+    l2_num_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
+    l2_den_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
+    h1_num_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
+    h1_den_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
+    l2_field_num_sum = torch.zeros(len(FIELD_NAMES), device=device)
+    l2_field_den_sum = torch.zeros(len(FIELD_NAMES), device=device)
+    h1_field_num_sum = torch.zeros(len(FIELD_NAMES), device=device)
+    h1_field_den_sum = torch.zeros(len(FIELD_NAMES), device=device)
     l2_diff_sq_sum = torch.zeros((), device=device)
     l2_ref_sq_sum = torch.zeros((), device=device)
     h1_diff_sq_sum = torch.zeros((), device=device)
@@ -141,36 +164,154 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
                             n_steps=int(u_ref.shape[1] - 1), dt=dt,
                             delta_clip=delta_clip)
         diff = u_pred - u_ref                           # (B, T+1, C, H, W)
-        # Per-channel relative L2: sqrt(area * Σ_spatial diff²) / sqrt(area * Σ_spatial ref²)
+        # Per-channel relative L2: sqrt(area * sum_spatial diff^2) / sqrt(area * sum_spatial ref^2)
         num = torch.sqrt(float(area) * diff.pow(2).sum(dim=(-2, -1)))   # (B, T+1, C)
         den = torch.sqrt(float(area) * u_ref.pow(2).sum(dim=(-2, -1))) # (B, T+1, C)
         rel_batches.append((num / (den + 1e-8)).detach().cpu())
+        field_num = _merge_velocity_norms(num)
+        field_den = _merge_velocity_norms(den)
+        rel_field_batches.append((field_num / (field_den + 1e-8)).detach().cpu())
         h1_diff_sq = _spectral_h1_squared_per_channel_2d(diff)
         h1_ref_sq = _spectral_h1_squared_per_channel_2d(u_ref)
-        rel_h1_batches.append(torch.sqrt(h1_diff_sq / (h1_ref_sq + 1e-12)).detach().cpu())
+        h1_num = torch.sqrt(h1_diff_sq)
+        h1_den = torch.sqrt(h1_ref_sq)
+        rel_h1_batches.append((h1_num / (h1_den + 1e-12)).detach().cpu())
+        h1_field_num = _merge_velocity_norms(h1_num)
+        h1_field_den = _merge_velocity_norms(h1_den)
+        rel_h1_field_batches.append((h1_field_num / (h1_field_den + 1e-12)).detach().cpu())
+        overall_rel_l2_batches.append((num.sum(dim=1) / (den.sum(dim=1) + 1e-8)).detach().cpu())
+        overall_rel_h1_batches.append((h1_num.sum(dim=1) / (h1_den.sum(dim=1) + 1e-12)).detach().cpu())
+        overall_rel_l2_field_batches.append((field_num.sum(dim=1) / (field_den.sum(dim=1) + 1e-8)).detach().cpu())
+        overall_rel_h1_field_batches.append((h1_field_num.sum(dim=1) / (h1_field_den.sum(dim=1) + 1e-12)).detach().cpu())
+        l2_num_sum += num.sum(dim=(0, 1))
+        l2_den_sum += den.sum(dim=(0, 1))
+        h1_num_sum += h1_num.sum(dim=(0, 1))
+        h1_den_sum += h1_den.sum(dim=(0, 1))
+        l2_field_num_sum += field_num.sum(dim=(0, 1))
+        l2_field_den_sum += field_den.sum(dim=(0, 1))
+        h1_field_num_sum += h1_field_num.sum(dim=(0, 1))
+        h1_field_den_sum += h1_field_den.sum(dim=(0, 1))
         l2_diff_sq_sum += float(area) * torch.sum(diff.square())
         l2_ref_sq_sum += float(area) * torch.sum(u_ref.square())
         h1_diff_sq_sum += torch.sum(h1_diff_sq)
         h1_ref_sq_sum += torch.sum(h1_ref_sq)
 
-    rel = torch.cat(rel_batches, dim=0)                 # (N, T+1, C)
-    rel_h1 = torch.cat(rel_h1_batches, dim=0)           # (N, T+1, C)
+    rel = torch.cat(rel_batches, dim=0)                         # (N, T+1, C)
+    rel_h1 = torch.cat(rel_h1_batches, dim=0)                   # (N, T+1, C)
+    rel_field = torch.cat(rel_field_batches, dim=0)             # (N, T+1, 3)
+    rel_h1_field = torch.cat(rel_h1_field_batches, dim=0)       # (N, T+1, 3)
+    overall_rel_l2_samples = torch.cat(overall_rel_l2_batches, dim=0)              # (N, C)
+    overall_rel_h1_samples = torch.cat(overall_rel_h1_batches, dim=0)              # (N, C)
+    overall_rel_l2_field_samples = torch.cat(overall_rel_l2_field_batches, dim=0)  # (N, 3)
+    overall_rel_h1_field_samples = torch.cat(overall_rel_h1_field_batches, dim=0)  # (N, 3)
     rel_mean = torch.nanmean(rel, dim=0).numpy().astype(np.float64)
     rel_median = np.nanmedian(rel.numpy(), axis=0).astype(np.float64)
     rel_h1_mean = torch.nanmean(rel_h1, dim=0).numpy().astype(np.float64)
     rel_h1_median = np.nanmedian(rel_h1.numpy(), axis=0).astype(np.float64)
+    rel_field_mean = torch.nanmean(rel_field, dim=0).numpy().astype(np.float64)
+    rel_field_median = np.nanmedian(rel_field.numpy(), axis=0).astype(np.float64)
+    rel_h1_field_mean = torch.nanmean(rel_h1_field, dim=0).numpy().astype(np.float64)
+    rel_h1_field_median = np.nanmedian(rel_h1_field.numpy(), axis=0).astype(np.float64)
+    rollout_rel_l2_channels = (l2_num_sum / (l2_den_sum + 1e-8)).detach().cpu().numpy().astype(np.float64)
+    rollout_rel_h1_channels = (h1_num_sum / (h1_den_sum + 1e-12)).detach().cpu().numpy().astype(np.float64)
+    rollout_rel_l2_fields = (l2_field_num_sum / (l2_field_den_sum + 1e-8)).detach().cpu().numpy().astype(np.float64)
+    rollout_rel_h1_fields = (h1_field_num_sum / (h1_field_den_sum + 1e-12)).detach().cpu().numpy().astype(np.float64)
+    sample_rel_l2_mean = np.nanmean(overall_rel_l2_field_samples.numpy(), axis=1)
+    sample_rel_h1_mean = np.nanmean(overall_rel_h1_field_samples.numpy(), axis=1)
     return {
         "rel_curve_mean": rel_mean,
         "rel_curve_median": rel_median,
         "rel_h1_curve_mean": rel_h1_mean,
         "rel_h1_curve_median": rel_h1_median,
-        "rollout_rel_mean": float(np.nanmean(rel_mean)),
-        "rollout_rel_median": float(np.nanmedian(rel_median)),
-        "rollout_rel_h1_mean": float(np.nanmean(rel_h1_mean)),
-        "rollout_rel_h1_median": float(np.nanmedian(rel_h1_median)),
-        "overall_rel_l2": float(torch.sqrt(l2_diff_sq_sum / (l2_ref_sq_sum + 1e-12)).item()),
-        "overall_rel_h1": float(torch.sqrt(h1_diff_sq_sum / (h1_ref_sq_sum + 1e-12)).item()),
+        "rel_field_curve_mean": rel_field_mean,
+        "rel_field_curve_median": rel_field_median,
+        "rel_h1_field_curve_mean": rel_h1_field_mean,
+        "rel_h1_field_curve_median": rel_h1_field_median,
+        "rel_samples": rel.numpy().astype(np.float64),
+        "rel_h1_samples": rel_h1.numpy().astype(np.float64),
+        "rel_field_samples": rel_field.numpy().astype(np.float64),
+        "rel_h1_field_samples": rel_h1_field.numpy().astype(np.float64),
+        "overall_rel_l2_samples": overall_rel_l2_samples.numpy().astype(np.float64),
+        "overall_rel_h1_samples": overall_rel_h1_samples.numpy().astype(np.float64),
+        "overall_rel_l2_field_samples": overall_rel_l2_field_samples.numpy().astype(np.float64),
+        "overall_rel_h1_field_samples": overall_rel_h1_field_samples.numpy().astype(np.float64),
+        "rollout_rel_l2_channels": rollout_rel_l2_channels,
+        "rollout_rel_h1_channels": rollout_rel_h1_channels,
+        "rollout_rel_l2_fields": rollout_rel_l2_fields,
+        "rollout_rel_h1_fields": rollout_rel_h1_fields,
+        "rollout_rel_mean": float(np.nanmean(rollout_rel_l2_fields)),
+        "rollout_rel_median": float(np.nanmedian(sample_rel_l2_mean)),
+        "rollout_rel_h1_mean": float(np.nanmean(rollout_rel_h1_fields)),
+        "rollout_rel_h1_median": float(np.nanmedian(sample_rel_h1_mean)),
+        "overall_rel_l2": float(np.nanmean(rollout_rel_l2_fields)),
+        "overall_rel_h1": float(np.nanmean(rollout_rel_h1_fields)),
+        "overall_rel_l2_global_components": float(torch.sqrt(l2_diff_sq_sum / (l2_ref_sq_sum + 1e-12)).item()),
+        "overall_rel_h1_global_components": float(torch.sqrt(h1_diff_sq_sum / (h1_ref_sq_sum + 1e-12)).item()),
     }
+
+
+def _add_rollout_std_metrics(metrics: Dict[str, float], curves: Dict[str, np.ndarray]) -> None:
+    rel_sample_overall = curves["overall_rel_l2_samples"]              # (N, C)
+    rel_h1_sample_overall = curves["overall_rel_h1_samples"]           # (N, C)
+    rel_field_sample_overall = curves["overall_rel_l2_field_samples"]  # (N, 3)
+    rel_h1_field_sample_overall = curves["overall_rel_h1_field_samples"]
+    for c, name in enumerate(CHANNEL_NAMES):
+        metrics[f"rollout_rel_l2_{name}_std"] = float(np.nanstd(rel_sample_overall[:, c]))
+        metrics[f"rollout_rel_h1_{name}_std"] = float(np.nanstd(rel_h1_sample_overall[:, c]))
+    for c, name in enumerate(FIELD_NAMES):
+        metrics[f"rollout_rel_l2_{name}_std"] = float(np.nanstd(rel_field_sample_overall[:, c]))
+        metrics[f"rollout_rel_h1_{name}_std"] = float(np.nanstd(rel_h1_field_sample_overall[:, c]))
+    metrics["rollout_rel_l2_std"] = float(np.nanstd(np.nanmean(rel_field_sample_overall, axis=1)))
+    metrics["rollout_rel_h1_std"] = float(np.nanstd(np.nanmean(rel_h1_field_sample_overall, axis=1)))
+
+
+def _add_rollout_max_metrics(metrics: Dict[str, float], curves: Dict[str, np.ndarray]) -> None:
+    rel_curve = curves["rel_curve_mean"]
+    rel_h1_curve = curves["rel_h1_curve_mean"]
+    rel_field_curve = curves["rel_field_curve_mean"]
+    rel_h1_field_curve = curves["rel_h1_field_curve_mean"]
+    for c, name in enumerate(CHANNEL_NAMES):
+        metrics[f"rollout_rel_l2_{name}_max"] = float(np.nanmax(rel_curve[:, c]))
+        metrics[f"rollout_rel_h1_{name}_max"] = float(np.nanmax(rel_h1_curve[:, c]))
+    for c, name in enumerate(FIELD_NAMES):
+        metrics[f"rollout_rel_l2_{name}_max"] = float(np.nanmax(rel_field_curve[:, c]))
+        metrics[f"rollout_rel_h1_{name}_max"] = float(np.nanmax(rel_h1_field_curve[:, c]))
+    metrics["rollout_rel_l2_max"] = float(np.nanmax(np.nanmean(rel_field_curve, axis=1)))
+    metrics["rollout_rel_h1_max"] = float(np.nanmax(np.nanmean(rel_h1_field_curve, axis=1)))
+
+
+def _stats_dict(component_values: np.ndarray, field_values: np.ndarray) -> Dict[str, object]:
+    out: Dict[str, object] = {
+        name: component_values[..., c].tolist()
+        for c, name in enumerate(CHANNEL_NAMES)
+    }
+    out["velocity"] = field_values[..., 1].tolist()
+    out["mean"] = np.nanmean(field_values, axis=-1).tolist()
+    return out
+
+
+def _save_per_sample_errors_json(curves: Dict[str, np.ndarray], path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rel_l2 = curves["rel_samples"]
+    rel_h1 = curves["rel_h1_samples"]
+    rel_l2_field = curves["rel_field_samples"]
+    rel_h1_field = curves["rel_h1_field_samples"]
+    overall_l2 = curves["overall_rel_l2_samples"]
+    overall_h1 = curves["overall_rel_h1_samples"]
+    overall_l2_field = curves["overall_rel_l2_field_samples"]
+    overall_h1_field = curves["overall_rel_h1_field_samples"]
+    n_samples = int(rel_l2.shape[0])
+    items = []
+    for sample_idx in range(n_samples):
+        items.append({
+            "sample_index": sample_idx,
+            "rel_l2": _stats_dict(rel_l2[sample_idx], rel_l2_field[sample_idx]),
+            "rel_h1": _stats_dict(rel_h1[sample_idx], rel_h1_field[sample_idx]),
+            "overall_rel_l2": _stats_dict(overall_l2[sample_idx], overall_l2_field[sample_idx]),
+            "overall_rel_h1": _stats_dict(overall_h1[sample_idx], overall_h1_field[sample_idx]),
+        })
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2)
 
 
 def _save_curve_csv(curves: Dict[str, np.ndarray], dt: float, path: str) -> None:
@@ -179,6 +320,10 @@ def _save_curve_csv(curves: Dict[str, np.ndarray], dt: float, path: str) -> None
     rel_l2_median = curves["rel_curve_median"]
     rel_h1_mean = curves["rel_h1_curve_mean"]
     rel_h1_median = curves["rel_h1_curve_median"]
+    rel_l2_field_mean = curves["rel_field_curve_mean"]
+    rel_l2_field_median = curves["rel_field_curve_median"]
+    rel_h1_field_mean = curves["rel_h1_field_curve_mean"]
+    rel_h1_field_median = curves["rel_h1_field_curve_median"]
     n_steps, n_ch = rel_l2_mean.shape
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -186,16 +331,19 @@ def _save_curve_csv(curves: Dict[str, np.ndarray], dt: float, path: str) -> None
         for prefix in ("rel_l2", "rel_h1"):
             for name in CHANNEL_NAMES:
                 header += [f"{prefix}_mean_{name}", f"{prefix}_median_{name}"]
+            header += [f"{prefix}_mean_velocity", f"{prefix}_median_velocity"]
             header += [f"{prefix}_mean_all", f"{prefix}_median_all"]
         writer.writerow(header)
         for k in range(n_steps):
             row = [k, f"{k * dt:.8f}"]
             for c in range(n_ch):
                 row += [rel_l2_mean[k, c], rel_l2_median[k, c]]
-            row += [rel_l2_mean[k].mean(), rel_l2_median[k].mean()]
+            row += [rel_l2_field_mean[k, 1], rel_l2_field_median[k, 1]]
+            row += [rel_l2_field_mean[k].mean(), rel_l2_field_median[k].mean()]
             for c in range(n_ch):
                 row += [rel_h1_mean[k, c], rel_h1_median[k, c]]
-            row += [rel_h1_mean[k].mean(), rel_h1_median[k].mean()]
+            row += [rel_h1_field_mean[k, 1], rel_h1_field_median[k, 1]]
+            row += [rel_h1_field_mean[k].mean(), rel_h1_field_median[k].mean()]
             writer.writerow(row)
 
 
@@ -210,13 +358,14 @@ def _plot_curve(curves: Dict[str, np.ndarray], dt: float, path: str) -> None:
     colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
     fig, axes = plt.subplots(1, 2, figsize=(14, 4), sharey=False)
     specs = (
-        (axes[0], curves["rel_curve_mean"], "relative L2", "Rollout Relative L2 Mean"),
-        (axes[1], curves["rel_h1_curve_mean"], "relative H1", "Rollout Relative H1 Mean"),
+        (axes[0], curves["rel_curve_mean"], curves["rel_field_curve_mean"], "relative L2", "Rollout Relative L2 Mean"),
+        (axes[1], curves["rel_h1_curve_mean"], curves["rel_h1_field_curve_mean"], "relative H1", "Rollout Relative H1 Mean"),
     )
-    for ax, data, ylabel, title in specs:
+    for ax, data, field_data, ylabel, title in specs:
         for c, (name, col) in enumerate(zip(CHANNEL_NAMES, colors)):
             ax.plot(t, data[:, c], color=col, label=name)
-        ax.plot(t, data.mean(axis=1), color="black", linestyle="--", linewidth=1.5, label="all-ch mean")
+        ax.plot(t, field_data[:, 1], color="tab:purple", linestyle=":", linewidth=1.5, label="velocity")
+        ax.plot(t, field_data.mean(axis=1), color="black", linestyle="--", linewidth=1.5, label="rho/velocity/p mean")
         ax.set_title(title)
         ax.set_xlabel("time")
         ax.set_ylabel(ylabel)
@@ -326,25 +475,33 @@ def main(args: argparse.Namespace) -> None:
     metrics["rollout_rel_h1"] = curves["rollout_rel_h1_mean"]
     metrics["rollout_rel_h1_median"] = curves["rollout_rel_h1_median"]
     for c, name in enumerate(CHANNEL_NAMES):
-        metrics[f"rollout_rel_l2_{name}"] = float(curves["rel_curve_mean"][:, c].mean())
-        metrics[f"rollout_rel_h1_{name}"] = float(curves["rel_h1_curve_mean"][:, c].mean())
+        metrics[f"rollout_rel_l2_{name}"] = float(curves["rollout_rel_l2_channels"][c])
+        metrics[f"rollout_rel_h1_{name}"] = float(curves["rollout_rel_h1_channels"][c])
+    for c, name in enumerate(FIELD_NAMES):
+        metrics[f"rollout_rel_l2_{name}"] = float(curves["rollout_rel_l2_fields"][c])
+        metrics[f"rollout_rel_h1_{name}"] = float(curves["rollout_rel_h1_fields"][c])
+    _add_rollout_std_metrics(metrics, curves)
+    _add_rollout_max_metrics(metrics, curves)
 
     print(f"Device: {device}")
     print(f"Split: {args.split}, n={int(split['u0'].shape[0])}, grid=({n_x},{n_y}), steps={n_steps}, dt={dt:.6f}")
     print(f"Evaluation snapshots: {eval_snapshots} / {original_n_steps + 1}")
     print(f"delta_clip: {delta_clip}")
     print("Step metrics:", {k: v for k, v in metrics.items() if "rollout" not in k})
-    print("Rollout rel L2 per channel:")
-    for c, name in enumerate(CHANNEL_NAMES):
+    print("Rollout rel L2 per field:")
+    for name in FIELD_NAMES:
         print(f"  {name}: {metrics[f'rollout_rel_l2_{name}']:.4f}")
     print(f"  mean:  {metrics['rollout_rel_l2']:.4f}")
-    print("Rollout rel H1 per channel:")
-    for c, name in enumerate(CHANNEL_NAMES):
+    print(f"  components: vx={metrics['rollout_rel_l2_vx']:.4f}, vy={metrics['rollout_rel_l2_vy']:.4f}")
+    print("Rollout rel H1 per field:")
+    for name in FIELD_NAMES:
         print(f"  {name}: {metrics[f'rollout_rel_h1_{name}']:.4f}")
     print(f"  mean:  {metrics['rollout_rel_h1']:.4f}")
+    print(f"  components: vx={metrics['rollout_rel_h1_vx']:.4f}, vy={metrics['rollout_rel_h1_vy']:.4f}")
     print(f"Overall relative L2 across time: {curves['overall_rel_l2']:.8e}")
     print(f"Overall relative H1 across time: {curves['overall_rel_h1']:.8e}")
     _save_curve_csv(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.csv"))
+    _save_per_sample_errors_json(curves, os.path.join(args.output_dir, f"{args.split}_per_sample_errors.json"))
     _plot_curve(curves, dt, os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png"))
     _plot_samples(model, split, device, dt, t_final,
                   _parse_snapshot_times(args.snapshot_times, t_final),
@@ -366,9 +523,14 @@ def main(args: argparse.Namespace) -> None:
         "metrics": metrics,
         "overall_rel_l2": curves["overall_rel_l2"],
         "overall_rel_h1": curves["overall_rel_h1"],
+        "overall_rel_l2_global_components": curves["overall_rel_l2_global_components"],
+        "overall_rel_h1_global_components": curves["overall_rel_h1_global_components"],
         "rel_l2_curve_mean": curves["rel_curve_mean"].tolist(),
         "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
+        "rel_l2_field_curve_mean": curves["rel_field_curve_mean"].tolist(),
+        "rel_h1_field_curve_mean": curves["rel_h1_field_curve_mean"].tolist(),
         "channel_names": CHANNEL_NAMES,
+        "field_names": FIELD_NAMES,
         "meta": meta,
     }
     summary_path = os.path.join(args.output_dir, f"{args.split}_summary.json")

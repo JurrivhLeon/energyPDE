@@ -24,7 +24,6 @@ try:
         StateDecoder2D,
         StateEncoder2D,
     )
-    from ..latent_markov_trainer import relative_spectral_hs_error_2d
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.latent_markov import (
@@ -34,7 +33,6 @@ except ImportError:
         StateDecoder2D,
         StateEncoder2D,
     )
-    from grad_flow_l2.latent_markov_trainer import relative_spectral_hs_error_2d
 
 
 def set_seed(seed: int, seed_cuda: bool = False) -> None:
@@ -228,6 +226,19 @@ def _evaluate_one_step_mse(model: LatentMarkovModel2D, split: Dict[str, torch.Te
     return total_sq / max(1, n_elem)
 
 
+def _spectral_h1_norm_2d(u: torch.Tensor) -> torch.Tensor:
+    n_x = int(u.shape[-2])
+    n_y = int(u.shape[-1])
+    u_hat = torch.fft.fft2(u, dim=(-2, -1), norm="ortho")
+    real_dtype = u.real.dtype
+    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u.device).to(dtype=real_dtype)
+    ky = 2.0 * torch.pi * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u.device).to(dtype=real_dtype)
+    kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
+    weight = 1.0 + kx_grid.square() + ky_grid.square()
+    power = u_hat.real.square() + u_hat.imag.square()
+    return torch.sqrt(torch.sum(power * weight, dim=(-2, -1)))
+
+
 @torch.no_grad()
 def _evaluate_rollout_rel_l2(
     model: LatentMarkovModel2D,
@@ -265,11 +276,18 @@ def _evaluate_rollout_curves(
     area: float,
     delta_clip: float,
 ) -> Dict[str, np.ndarray]:
+    rel_batches = []
+    rel_h1_batches = []
+    overall_rel_l2_batches = []
+    overall_rel_h1_batches = []
+    l2_num_sum = torch.zeros((), device=device)
+    l2_den_sum = torch.zeros((), device=device)
+    h1_num_sum = torch.zeros((), device=device)
+    h1_den_sum = torch.zeros((), device=device)
     u0 = split["u0"].to(device)
     f = split["f"].to(device)
     u_ref = split["u_traj"].to(device)
     n_steps = int(u_ref.shape[1] - 1)
-
     u_pred = _rollout(
         model,
         u0=u0,
@@ -281,25 +299,72 @@ def _evaluate_rollout_curves(
     diff = u_pred - u_ref
     num = torch.sqrt(area * torch.sum(diff * diff, dim=(-2, -1)))
     den = torch.sqrt(area * torch.sum(u_ref * u_ref, dim=(-2, -1)))
-    rel = num / (den + 1e-8)
-    rel_curve_mean = torch.nanmean(rel, dim=0).cpu().numpy()
-    rel_curve_median = np.nanmedian(rel.cpu().numpy(), axis=0)
-    rel_per_sample_mean = torch.nanmean(rel, dim=1).cpu().numpy()
-    rel_h1 = relative_spectral_hs_error_2d(u_pred, u_ref, s=1.0)
-    rel_h1_curve_mean = torch.nanmean(rel_h1, dim=0).cpu().numpy()
-    rel_h1_curve_median = np.nanmedian(rel_h1.cpu().numpy(), axis=0)
-    rel_h1_per_sample_mean = torch.nanmean(rel_h1, dim=1).cpu().numpy()
+    h1_num = _spectral_h1_norm_2d(diff)
+    h1_den = _spectral_h1_norm_2d(u_ref)
+    rel_batches.append((num / (den + 1e-8)).detach().cpu())
+    rel_h1_batches.append((h1_num / (h1_den + 1e-12)).detach().cpu())
+    overall_rel_l2_batches.append((num.sum(dim=1) / (den.sum(dim=1) + 1e-8)).detach().cpu())
+    overall_rel_h1_batches.append((h1_num.sum(dim=1) / (h1_den.sum(dim=1) + 1e-12)).detach().cpu())
+    l2_num_sum += num.sum()
+    l2_den_sum += den.sum()
+    h1_num_sum += h1_num.sum()
+    h1_den_sum += h1_den.sum()
+
+    rel = torch.cat(rel_batches, dim=0)
+    rel_h1 = torch.cat(rel_h1_batches, dim=0)
+    overall_rel_l2_samples = torch.cat(overall_rel_l2_batches, dim=0).numpy().astype(np.float64)
+    overall_rel_h1_samples = torch.cat(overall_rel_h1_batches, dim=0).numpy().astype(np.float64)
+    rel_curve_mean = torch.nanmean(rel, dim=0).numpy().astype(np.float64)
+    rel_curve_median = np.nanmedian(rel.numpy(), axis=0).astype(np.float64)
+    rel_h1_curve_mean = torch.nanmean(rel_h1, dim=0).numpy().astype(np.float64)
+    rel_h1_curve_median = np.nanmedian(rel_h1.numpy(), axis=0).astype(np.float64)
+    rollout_rel_l2 = float((l2_num_sum / (l2_den_sum + 1e-8)).item())
+    rollout_rel_h1 = float((h1_num_sum / (h1_den_sum + 1e-12)).item())
 
     return {
-        "rel_curve_mean": rel_curve_mean.astype(np.float64),
-        "rel_curve_median": rel_curve_median.astype(np.float64),
-        "rollout_rel_mean": float(np.nanmean(rel_per_sample_mean)),
-        "rollout_rel_median": float(np.nanmedian(rel_per_sample_mean)),
-        "rel_h1_curve_mean": rel_h1_curve_mean.astype(np.float64),
-        "rel_h1_curve_median": rel_h1_curve_median.astype(np.float64),
-        "rollout_rel_h1": float(np.nanmean(rel_h1_per_sample_mean)),
-        "rollout_rel_h1_median": float(np.nanmedian(rel_h1_per_sample_mean)),
+        "rel_curve_mean": rel_curve_mean,
+        "rel_curve_median": rel_curve_median,
+        "rollout_rel_mean": rollout_rel_l2,
+        "rollout_rel_median": float(np.nanmedian(overall_rel_l2_samples)),
+        "rollout_rel_std": float(np.nanstd(overall_rel_l2_samples)),
+        "rollout_rel_max": float(np.nanmax(rel_curve_mean)),
+        "rel_h1_curve_mean": rel_h1_curve_mean,
+        "rel_h1_curve_median": rel_h1_curve_median,
+        "rollout_rel_h1": rollout_rel_h1,
+        "rollout_rel_h1_median": float(np.nanmedian(overall_rel_h1_samples)),
+        "rollout_rel_h1_std": float(np.nanstd(overall_rel_h1_samples)),
+        "rollout_rel_h1_max": float(np.nanmax(rel_h1_curve_mean)),
+        "rel_samples": rel.numpy().astype(np.float64),
+        "rel_h1_samples": rel_h1.numpy().astype(np.float64),
+        "overall_rel_l2_samples": overall_rel_l2_samples,
+        "overall_rel_h1_samples": overall_rel_h1_samples,
+        "overall_rel_l2": rollout_rel_l2,
+        "overall_rel_h1": rollout_rel_h1,
     }
+
+
+def _sample_stats(values: np.ndarray) -> Dict[str, object]:
+    val = np.asarray(values)
+    return {"vorticity": val.tolist(), "mean": val.tolist()}
+
+
+def _save_per_sample_errors_json(curves: Dict[str, np.ndarray], out_path: str) -> None:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    rel_l2 = curves["rel_samples"]
+    rel_h1 = curves["rel_h1_samples"]
+    overall_l2 = curves["overall_rel_l2_samples"]
+    overall_h1 = curves["overall_rel_h1_samples"]
+    items = []
+    for sample_idx in range(int(rel_l2.shape[0])):
+        items.append({
+            "sample_index": sample_idx,
+            "rel_l2": _sample_stats(rel_l2[sample_idx]),
+            "rel_h1": _sample_stats(rel_h1[sample_idx]),
+            "overall_rel_l2": _sample_stats(overall_l2[sample_idx]),
+            "overall_rel_h1": _sample_stats(overall_h1[sample_idx]),
+        })
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2)
 
 
 def _save_rollout_curve_csv(
@@ -572,14 +637,6 @@ def main(args: argparse.Namespace) -> None:
     print(f"Loaded checkpoint: {args.checkpoint_path}")
 
     step_mse = _evaluate_one_step_mse(model, split, device=device, dt=dt)
-    rollout_rel = _evaluate_rollout_rel_l2(
-        model,
-        split,
-        device=device,
-        dt=dt,
-        area=area,
-        delta_clip=args.delta_clip,
-    )
     curves = _evaluate_rollout_curves(
         model,
         split,
@@ -591,10 +648,14 @@ def main(args: argparse.Namespace) -> None:
     rel_curve_mean = curves["rel_curve_mean"]
     rel_curve_median = curves["rel_curve_median"]
     print(f"Split one-step MSE: {step_mse:.8e}")
-    print(f"Split rollout mean relative L2: {rollout_rel:.8e}")
+    print(f"Split rollout mean relative L2: {curves['rollout_rel_mean']:.8e}")
     print(f"Split rollout median relative L2: {curves['rollout_rel_median']:.8e}")
     print(f"Split rollout mean relative H1: {curves['rollout_rel_h1']:.8e}")
     print(f"Split rollout median relative H1: {curves['rollout_rel_h1_median']:.8e}")
+    print(f"Split rollout std relative L2: {curves['rollout_rel_std']:.8e}")
+    print(f"Split rollout std relative H1: {curves['rollout_rel_h1_std']:.8e}")
+    print(f"Split max rollout curve relative L2: {curves['rollout_rel_max']:.8e}")
+    print(f"Split max rollout curve relative H1: {curves['rollout_rel_h1_max']:.8e}")
     print(
         "Rollout accumulation by step "
         "(step, time, rel_l2_mean, rel_l2_median, rel_h1_mean, rel_h1_median):"
@@ -624,6 +685,9 @@ def main(args: argparse.Namespace) -> None:
         time_values=time_values,
         out_path=curve_png,
     )
+    per_sample_path = os.path.join(args.output_dir, f"{args.split}_per_sample_errors.json")
+    _save_per_sample_errors_json(curves, out_path=per_sample_path)
+    print(f"Saved per-sample errors: {per_sample_path}")
 
     sample_dir = os.path.join(args.output_dir, f"{args.split}_sample_comparisons")
     _plot_test_samples(
@@ -651,10 +715,17 @@ def main(args: argparse.Namespace) -> None:
         "time_values": time_values.tolist(),
         "delta_clip": args.delta_clip,
         "step_mse": step_mse,
-        "rollout_rel_l2": rollout_rel,
+        "rollout_rel_l2": curves["rollout_rel_mean"],
         "rollout_rel_l2_median": curves["rollout_rel_median"],
+        "rollout_rel_l2_std": curves["rollout_rel_std"],
+        "rollout_rel_l2_max": curves["rollout_rel_max"],
+        "overall_rel_l2": curves["overall_rel_l2"],
         "rollout_rel_h1": curves["rollout_rel_h1"],
         "rollout_rel_h1_median": curves["rollout_rel_h1_median"],
+        "rollout_rel_h1_std": curves["rollout_rel_h1_std"],
+        "rollout_rel_h1_max": curves["rollout_rel_h1_max"],
+        "overall_rel_h1": curves["overall_rel_h1"],
+        "field_names": ["vorticity"],
         "rel_curve_mean": curves["rel_curve_mean"].tolist(),
         "rel_curve_median": curves["rel_curve_median"].tolist(),
         "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
