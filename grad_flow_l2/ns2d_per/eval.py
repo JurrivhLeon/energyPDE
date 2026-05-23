@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs/eval")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="If set, truncate trajectories to this many steps (e.g. 30 keeps snapshots T=0..30).",
+    )
 
     # Must match training architecture.
     parser.add_argument("--hidden-channels", type=int, default=64)
@@ -621,6 +627,11 @@ def main(args: argparse.Namespace) -> None:
     h_y = 1.0 / float(n_y)
     area = h_x * h_y
     dt, t_start, t_final, time_values = _time_metadata(meta, n_steps=n_steps)
+    if args.max_steps is not None:
+        n_steps = min(int(args.max_steps), n_steps)
+        split["u_traj"] = split["u_traj"][:, : n_steps + 1]
+        time_values = time_values[: n_steps + 1]
+        t_final = float(time_values[-1])
     snapshot_times = _parse_snapshot_times(args.snapshot_times, t_start=t_start, t_end=t_final)
 
     print(f"Loaded split={args.split} from {args.dataset_path}")
@@ -731,6 +742,7 @@ def main(args: argparse.Namespace) -> None:
         "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
         "rel_h1_curve_median": curves["rel_h1_curve_median"].tolist(),
         "snapshot_times": snapshot_times,
+        "max_steps": args.max_steps,
         "seed": int(args.seed),
         "meta": meta,
     }

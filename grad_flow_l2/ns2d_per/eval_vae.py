@@ -86,6 +86,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional L-infinity clip on decoded rollout states. Use <=0 to disable.",
     )
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="If set, truncate trajectories to this many steps (e.g. 30 keeps snapshots T=0..30).",
+    )
     return parser.parse_args()
 
 
@@ -462,6 +468,11 @@ def main(args: argparse.Namespace) -> None:
     n_y = int(split["u0"].shape[2])
     n_steps = int(split["u_traj"].shape[1] - 1)
     dt, t_start, t_final, time_values = _time_metadata(meta, n_steps=n_steps)
+    if args.max_steps is not None:
+        n_steps = min(int(args.max_steps), n_steps)
+        split["u_traj"] = split["u_traj"][:, : n_steps + 1]
+        time_values = time_values[: n_steps + 1]
+        t_final = float(time_values[-1])
     h_x = 1.0 / float(n_x)
     h_y = 1.0 / float(n_y)
     area = h_x * h_y
@@ -603,6 +614,7 @@ def main(args: argparse.Namespace) -> None:
         "deterministic_dynamics": True,
         "delta_clip": float(args.delta_clip),
         "state_clip": float(args.state_clip),
+        "max_steps": args.max_steps,
         "seed": int(args.seed),
         "meta": meta,
     }

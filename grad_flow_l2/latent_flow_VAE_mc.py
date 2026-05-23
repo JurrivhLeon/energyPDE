@@ -53,9 +53,11 @@ def _padding_mode_1d(boundary_condition: str) -> str:
     bc = boundary_condition.strip().lower()
     if bc in {"periodic", "circular", "torus"}:
         return "circular"
+    if bc in {"neumann", "reflect", "replicate", "outflow", "transmissive"}:
+        return "replicate"
     if bc in {"dirichlet", "zero", "zeros", "constant"}:
         return "zeros"
-    raise ValueError("boundary_condition must be one of {'periodic','dirichlet'}")
+    raise ValueError("boundary_condition must be one of {'periodic','dirichlet','neumann'}")
 
 
 def _pad_1d(x: torch.Tensor, padding: int, padding_mode: str) -> torch.Tensor:

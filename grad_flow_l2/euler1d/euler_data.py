@@ -1,5 +1,5 @@
 """
-Data generation for the 1D compressible Euler equations on the unit torus.
+Data generation for the 1D compressible Euler equations.
 
 The numerical solver evolves conservative variables
     U = (rho, rho*u, E)
@@ -140,12 +140,37 @@ def max_wave_speed(U: torch.Tensor, gamma: float = 1.4) -> torch.Tensor:
     return q[:, 1].abs() + c
 
 
-def _rusanov_step(U: torch.Tensor, dx: float, dt: float, gamma: float = 1.4) -> torch.Tensor:
-    U_r = torch.roll(U, shifts=-1, dims=-1)
-    F_l = euler_flux(U, gamma=gamma)
+def _normalize_boundary_condition(boundary_condition: str) -> str:
+    bc = str(boundary_condition).strip().lower()
+    if bc in {"periodic", "circular", "torus"}:
+        return "periodic"
+    if bc in {"outflow", "transmissive", "neumann", "replicate"}:
+        return "outflow"
+    raise ValueError("boundary_condition must be one of {periodic,outflow}")
+
+
+def _rusanov_interface_flux(U_l: torch.Tensor, U_r: torch.Tensor, gamma: float = 1.4) -> torch.Tensor:
+    F_l = euler_flux(U_l, gamma=gamma)
     F_r = euler_flux(U_r, gamma=gamma)
-    a = torch.maximum(max_wave_speed(U, gamma=gamma), max_wave_speed(U_r, gamma=gamma)).unsqueeze(1)
-    flux_iphalf = 0.5 * (F_l + F_r) - 0.5 * a * (U_r - U)
+    a = torch.maximum(max_wave_speed(U_l, gamma=gamma), max_wave_speed(U_r, gamma=gamma)).unsqueeze(1)
+    return 0.5 * (F_l + F_r) - 0.5 * a * (U_r - U_l)
+
+
+def _rusanov_step(
+    U: torch.Tensor,
+    dx: float,
+    dt: float,
+    gamma: float = 1.4,
+    boundary_condition: str = "periodic",
+) -> torch.Tensor:
+    bc = _normalize_boundary_condition(boundary_condition)
+    if bc == "outflow":
+        U_ext = torch.cat([U[..., :1], U, U[..., -1:]], dim=-1)
+        flux = _rusanov_interface_flux(U_ext[..., :-1], U_ext[..., 1:], gamma=gamma)
+        return U - (float(dt) / float(dx)) * (flux[..., 1:] - flux[..., :-1])
+
+    U_r = torch.roll(U, shifts=-1, dims=-1)
+    flux_iphalf = _rusanov_interface_flux(U, U_r, gamma=gamma)
     flux_imhalf = torch.roll(flux_iphalf, shifts=1, dims=-1)
     return U - (float(dt) / float(dx)) * (flux_iphalf - flux_imhalf)
 
@@ -161,6 +186,7 @@ def solve_euler1d_trajectory(
     rho_floor: float = 1e-6,
     p_floor: float = 1e-6,
     max_substeps: int = 100000,
+    boundary_condition: str = "periodic",
 ) -> torch.Tensor:
     if u0_prim.dim() != 3 or int(u0_prim.shape[1]) != STATE_CHANNELS:
         raise ValueError("u0_prim must have shape (batch,3,n_x)")
@@ -186,7 +212,7 @@ def solve_euler1d_trajectory(
         dt_cfl = float(cfl) * dx / max(speed, 1e-12)
         dt = dt_cfl if solver_dt is None else min(float(solver_dt), dt_cfl)
         dt = min(dt, next_record - t)
-        U = _rusanov_step(U, dx=dx, dt=dt, gamma=gamma)
+        U = _rusanov_step(U, dx=dx, dt=dt, gamma=gamma, boundary_condition=boundary_condition)
         q = conserved_to_primitive(U, gamma=gamma, rho_floor=rho_floor, p_floor=p_floor)
         U = primitive_to_conserved(q, gamma=gamma)
         t += dt
@@ -269,6 +295,43 @@ def sample_euler1d_initial_conditions(
     return torch.stack([rho, u, p], dim=1)
 
 
+def sample_euler1d_shocktube_initial_conditions(
+    n_x: int,
+    n_samples: int,
+    domain_length: float,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float64,
+    x0_middle_fraction: float = 0.2,
+) -> torch.Tensor:
+    if n_x <= 0 or n_samples < 0:
+        raise ValueError("n_x must be positive and n_samples must be nonnegative")
+    if domain_length <= 0.0:
+        raise ValueError("domain_length must be positive")
+    frac = float(x0_middle_fraction)
+    if not (0.0 < frac <= 1.0):
+        raise ValueError("x0_middle_fraction must be in (0,1]")
+
+    z = torch.rand(n_samples, 6, device=device, dtype=dtype)
+    g = 2.0 * z - 1.0
+    rho_l = 0.75 + 0.45 * g[:, 0]
+    rho_r = 0.40 + 0.30 * g[:, 1]
+    u_l = 0.50 + 0.50 * g[:, 2]
+    u_r = torch.zeros_like(u_l)
+    p_l = 2.50 + 1.60 * g[:, 3]
+    p_r = 0.375 + 0.325 * g[:, 4]
+
+    x0_min = 0.5 * float(domain_length) * (1.0 - frac)
+    x0_max = 0.5 * float(domain_length) * (1.0 + frac)
+    x0 = x0_min + (x0_max - x0_min) * z[:, 5]
+    x = (torch.arange(n_x, device=device, dtype=dtype) + 0.5) * (float(domain_length) / float(n_x))
+    left = x.view(1, -1) < x0.view(-1, 1)
+
+    rho = torch.where(left, rho_l.view(-1, 1), rho_r.view(-1, 1))
+    u = torch.where(left, u_l.view(-1, 1), u_r.view(-1, 1))
+    p = torch.where(left, p_l.view(-1, 1), p_r.view(-1, 1))
+    return torch.stack([rho, u, p], dim=1)
+
+
 def _slice_split(data: Dict[str, torch.Tensor], start: int, end: int) -> Dict[str, torch.Tensor]:
     return {
         "f": data["f"][start:end].clone(),
@@ -297,6 +360,9 @@ def generate_euler1d_dataset_splits(
     mach_max: float = 0.35,
     max_modes: int = 5,
     decay: float = 2.0,
+    ic_type: str = "smooth",
+    boundary_condition: str = "periodic",
+    x0_middle_fraction: float = 0.2,
     solve_batch_size: int = 32,
     max_substeps: int = 100000,
     seed: int = 42,
@@ -318,22 +384,38 @@ def generate_euler1d_dataset_splits(
     solve_n_x = int(n_x if solver_n_x is None else solver_n_x)
     if solve_n_x < int(n_x) or solve_n_x % int(n_x) != 0:
         raise ValueError("solver_n_x must be >= n_x and divisible by n_x")
+    bc = _normalize_boundary_condition(boundary_condition)
+    ic = str(ic_type).strip().lower()
 
-    u0_all = sample_euler1d_initial_conditions(
-        n_x=solve_n_x,
-        n_samples=total,
-        gamma=gamma,
-        rho0=rho0,
-        rho_amp=rho_amp,
-        p0=p0,
-        p_amp=p_amp,
-        mach_min=mach_min,
-        mach_max=mach_max,
-        max_modes=max_modes,
-        decay=decay,
-        device=device,
-        dtype=dtype,
-    )
+    if ic in {"smooth", "fourier", "random_fourier"}:
+        ic = "smooth"
+        u0_all = sample_euler1d_initial_conditions(
+            n_x=solve_n_x,
+            n_samples=total,
+            gamma=gamma,
+            rho0=rho0,
+            rho_amp=rho_amp,
+            p0=p0,
+            p_amp=p_amp,
+            mach_min=mach_min,
+            mach_max=mach_max,
+            max_modes=max_modes,
+            decay=decay,
+            device=device,
+            dtype=dtype,
+        )
+    elif ic in {"shocktube", "shock_tube"}:
+        ic = "shocktube"
+        u0_all = sample_euler1d_shocktube_initial_conditions(
+            n_x=solve_n_x,
+            n_samples=total,
+            domain_length=domain_length,
+            device=device,
+            dtype=dtype,
+            x0_middle_fraction=x0_middle_fraction,
+        )
+    else:
+        raise ValueError("ic_type must be one of {smooth,shocktube}")
     f_all = torch.zeros(total, n_x, dtype=output_dtype)
 
     starts = range(0, total, int(solve_batch_size))
@@ -352,6 +434,7 @@ def generate_euler1d_dataset_splits(
             cfl=cfl,
             solver_dt=solver_dt,
             max_substeps=max_substeps,
+            boundary_condition=bc,
         )
         traj = downsample_periodic_primitive(traj, target_n_x=n_x)
         chunks.append(traj.to(dtype=output_dtype).cpu())
@@ -368,10 +451,13 @@ def generate_euler1d_dataset_splits(
         "meta": {
             "dataset_version": DATASET_VERSION,
             "equation": "compressible_euler_1d",
-            "domain": f"periodic_[0,{float(domain_length)}]",
+            "domain": f"[0,{float(domain_length)}]",
             "domain_length": float(domain_length),
-            "periodic": True,
-            "boundary_condition": "periodic",
+            "periodic": bc == "periodic",
+            "boundary_condition": "periodic" if bc == "periodic" else "neumann",
+            "solver_boundary_condition": bc,
+            "ic_type": ic,
+            "x0_middle_fraction": float(x0_middle_fraction),
             "n_x": int(n_x),
             "solver_n_x": int(solve_n_x),
             "n_steps": int(n_steps),
@@ -450,6 +536,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mach-max", type=float, default=0.35)
     p.add_argument("--max-modes", type=int, default=5)
     p.add_argument("--decay", type=float, default=2.0)
+    p.add_argument("--ic-type", type=str, default="smooth", choices=["smooth", "shocktube"])
+    p.add_argument("--boundary-condition", type=str, default="periodic", choices=["periodic", "outflow", "transmissive", "neumann"])
+    p.add_argument("--x0-middle-fraction", type=float, default=0.2)
     p.add_argument("--solve-batch-size", type=int, default=32)
     p.add_argument("--max-substeps", type=int, default=100000)
     p.add_argument("--seed", type=int, default=42)
@@ -479,6 +568,9 @@ def main(args: argparse.Namespace) -> None:
         mach_max=args.mach_max,
         max_modes=args.max_modes,
         decay=args.decay,
+        ic_type=args.ic_type,
+        boundary_condition=args.boundary_condition,
+        x0_middle_fraction=args.x0_middle_fraction,
         solve_batch_size=args.solve_batch_size,
         max_substeps=args.max_substeps,
         seed=args.seed,
