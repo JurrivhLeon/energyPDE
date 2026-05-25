@@ -9,6 +9,8 @@ import random
 from datetime import datetime
 from typing import Dict, Optional
 
+import math
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -114,6 +116,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--amp-head-hidden", type=int, default=32)
     p.add_argument("--noise-corr-length", type=float, default=1.0)
     p.add_argument("--noise-decay-s", type=float, default=2.0)
+    p.add_argument("--alpha-unbounded", action="store_true")
+    p.add_argument("--alpha-min", type=float, default=1e-4)
+    p.add_argument("--alpha-max", type=float, default=2.0)
+    p.add_argument("--alpha-init", type=float, default=0.10)
     p.add_argument("--beta-kl", type=float, default=1e-2)
     p.add_argument("--lambda-rec", type=float, default=1.0)
     p.add_argument("--epochs", type=int, default=200)
@@ -174,12 +180,14 @@ def _build_model(
         use_grid_features=not args.disable_fno_grid,
         default_dt=dt,
     )
+    alpha_is_bounded = not args.alpha_unbounded
     amp = TransitionAmplitudeHead1D(
         n_x=n_x,
         latent_channels=args.latent_channels,
         hidden_channels=args.amp_head_hidden,
         use_forcing_channel=use_forcing,
         boundary_condition=boundary_condition,
+        alpha_init=args.alpha_init,
     )
     return LatentVAE1D(
         encoder=encoder,
@@ -188,6 +196,9 @@ def _build_model(
         amplitude_head=amp,
         noise_corr_length=args.noise_corr_length,
         noise_decay_s=args.noise_decay_s,
+        alpha_is_bounded=alpha_is_bounded,
+        alpha_min=args.alpha_min,
+        alpha_max=args.alpha_max,
     )
 
 
@@ -284,7 +295,7 @@ class EulerLatentVAETrainer:
                 m.update(losses[k].item(), bsz)
             if pbar is not None and (i == 1 or i % 10 == 0):
                 pbar.set_postfix(
-                    total=f"{meters['loss'].avg:.4f}", kl=f"{meters['loss_kl'].avg:.4f}"
+                    total=f"{meters['loss'].avg:.4f}", alpha=f"{meters['alpha_mean'].avg:.4f}", kl=f"{meters['loss_kl'].avg:.4f}"
                 )
         if pbar is not None:
             pbar.close()

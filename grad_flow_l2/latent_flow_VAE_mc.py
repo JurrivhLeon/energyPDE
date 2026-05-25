@@ -400,6 +400,7 @@ class TransitionAmplitudeHead1D(nn.Module):
         hidden_channels: int = 32,
         use_forcing_channel: bool = True,
         boundary_condition: str = "periodic",
+        alpha_init: float | None = None,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -415,6 +416,12 @@ class TransitionAmplitudeHead1D(nn.Module):
             nn.GELU(),
         )
         self.out = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+        if alpha_init is not None:
+            nn.init.zeros_(self.out.weight)
+            nn.init.constant_(self.out.bias, torch.log(torch.exp(torch.tensor(alpha_init)) - 1))
+        else:
+            nn.init.zeros_(self.out.weight)
+            nn.init.zeros_(self.out.bias)
         self.softplus = nn.Softplus()
 
     def forward(self, z: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
@@ -440,10 +447,10 @@ class TransitionAmplitudeHead1D(nn.Module):
 
         h = self.net(torch.cat(feat, dim=1))
         pooled = h.mean(dim=-1, keepdim=True)
-        alpha = self.softplus(self.out(pooled)).view(batch_size)
+        alpha_raw = self.softplus(self.out(pooled)).view(batch_size)
         if squeeze:
-            return alpha.squeeze(0)
-        return alpha
+            return alpha_raw.squeeze(0)
+        return alpha_raw
 
 
 class LatentVAE1D(nn.Module):
@@ -459,6 +466,9 @@ class LatentVAE1D(nn.Module):
         amplitude_head: TransitionAmplitudeHead1D,
         noise_corr_length: float = 1.0,
         noise_decay_s: float = 2.0,
+        alpha_is_bounded: bool = True,
+        alpha_min: float = 1e-4,
+        alpha_max: float = 0.5,
     ):
         super().__init__()
         if noise_corr_length <= 0.0:
@@ -471,6 +481,12 @@ class LatentVAE1D(nn.Module):
         self.amplitude_head = amplitude_head
         self.noise_corr_length = float(noise_corr_length)
         self.noise_decay_s = float(noise_decay_s)
+        self.alpha_is_bounded = bool(alpha_is_bounded)
+        if self.alpha_is_bounded:
+            self.alpha_min = float(alpha_min)
+            self.alpha_max = float(alpha_max)
+            if self.alpha_min < 0.0 or self.alpha_max <= self.alpha_min:
+                raise ValueError("alpha bounds must satisfy 0 <= alpha_min < alpha_max")
 
     @property
     def latent_channels(self) -> int:
@@ -503,7 +519,11 @@ class LatentVAE1D(nn.Module):
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:
         mu_p = self.transition(z, f, dt=dt)
-        alpha = self.amplitude_head(z, f)
+        alpha_raw = self.amplitude_head(z, f)
+        if self.alpha_is_bounded:
+            alpha = (self.alpha_min + alpha_raw).clamp(max=self.alpha_max)
+        else:
+            alpha = alpha_raw
         prior_logvar_scalar = torch.log(alpha.square() + 1e-12)
         return mu_p, prior_logvar_scalar
 
@@ -799,10 +819,10 @@ class TransitionAmplitudeHead2D(nn.Module):
 
         h = self.net(torch.cat(feat, dim=1))
         pooled = h.mean(dim=(-2, -1), keepdim=True)
-        alpha_logit = self.out(pooled).view(batch_size)
+        raw_alpha = self.out(pooled).view(batch_size)
         if squeeze:
-            return alpha_logit.squeeze(0)
-        return alpha_logit
+            return raw_alpha.squeeze(0)
+        return raw_alpha
 
 
 class PeriodicLatentVAE2D(nn.Module):
@@ -881,8 +901,8 @@ class PeriodicLatentVAE2D(nn.Module):
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:
         mu_p = self.transition(z, f, dt=dt)
-        alpha_logit = self.amplitude_head(z, f)
-        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(alpha_logit)
+        raw_alpha = self.amplitude_head(z, f)
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(raw_alpha)
         alpha = alpha * self.transition_noise_scale
         prior_logvar_scalar = torch.log(alpha.square() + 1e-12)
         return mu_p, prior_logvar_scalar
