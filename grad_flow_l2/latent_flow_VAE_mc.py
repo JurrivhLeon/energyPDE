@@ -775,7 +775,7 @@ class TransitionAmplitudeHead2D(nn.Module):
         hidden_channels: int = 32,
         use_forcing_channel: bool = True,
         boundary_condition: str = "periodic",
-        alpha_init_logit: float | None = None,
+        alpha_init: float | None = None,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -793,9 +793,10 @@ class TransitionAmplitudeHead2D(nn.Module):
             nn.GELU(),
         )
         self.out = nn.Conv2d(hidden_channels, 1, kernel_size=1)
-        if alpha_init_logit is not None:
+        if alpha_init is not None:
             nn.init.zeros_(self.out.weight)
-            nn.init.constant_(self.out.bias, float(alpha_init_logit))
+            nn.init.constant_(self.out.bias, torch.log(torch.exp(torch.tensor(alpha_init)) - 1))
+        self.softplus = nn.Softplus()
 
     def forward(self, z: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
         squeeze = False
@@ -819,10 +820,10 @@ class TransitionAmplitudeHead2D(nn.Module):
 
         h = self.net(torch.cat(feat, dim=1))
         pooled = h.mean(dim=(-2, -1), keepdim=True)
-        raw_alpha = self.out(pooled).view(batch_size)
+        alpha_raw = self.out(pooled).view(batch_size)
         if squeeze:
-            return raw_alpha.squeeze(0)
-        return raw_alpha
+            return self.softplus(alpha_raw).squeeze(0)
+        return self.softplus(alpha_raw)
 
 
 class PeriodicLatentVAE2D(nn.Module):
@@ -901,8 +902,8 @@ class PeriodicLatentVAE2D(nn.Module):
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:
         mu_p = self.transition(z, f, dt=dt)
-        raw_alpha = self.amplitude_head(z, f)
-        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(raw_alpha)
+        alpha_raw = self.amplitude_head(z, f)
+        alpha = (self.alpha_min + alpha_raw).clamp(max=self.alpha_max)
         alpha = alpha * self.transition_noise_scale
         prior_logvar_scalar = torch.log(alpha.square() + 1e-12)
         return mu_p, prior_logvar_scalar

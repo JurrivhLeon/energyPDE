@@ -243,6 +243,7 @@ class LatentVAETrainer2D:
                 m.update(losses[k].item(), bsz)
             if pbar is not None and (batch_idx == 1 or batch_idx % 10 == 0):
                 pbar.set_postfix(total=f"{meters['loss'].avg:.4f}",
+                                 alpha=f"{meters['alpha_mean'].avg:.4f}",
                                  step=f"{meters['loss_step'].avg:.4f}",
                                  kl=f"{meters['loss_kl'].avg:.4f}")
         if pbar is not None:
@@ -421,9 +422,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spectral-var-floor", type=float, default=1e-2)
     parser.add_argument("--alpha-min", type=float, default=1e-4,
                         help="Minimum transition-noise amplitude before global scaling.")
-    parser.add_argument("--alpha-max", type=float, default=0.5,
+    parser.add_argument("--alpha-max", type=float, default=5.0,
                         help="Maximum transition-noise amplitude before global scaling.")
-    parser.add_argument("--alpha-init", type=float, default=0.075,
+    parser.add_argument("--alpha-init", type=float, default=0.10,
                         help="Initial transition-noise amplitude before global scaling.")
     parser.add_argument("--transition-noise-scale", type=float, default=1.0,
                         help="Global multiplier on sampled latent transition noise; use small positive values to suppress blur.")
@@ -485,19 +486,17 @@ def _build_model(n_x: int, n_y: int, dt: float,
         boundary_condition=bc,
     )
     alpha_min = float(getattr(args, "alpha_min", 1e-4))
-    alpha_max = float(getattr(args, "alpha_max", 0.5))
-    alpha_init = float(getattr(args, "alpha_init", 0.075))
+    alpha_max = float(getattr(args, "alpha_max", 5.0))
+    alpha_init = float(getattr(args, "alpha_init", 0.10))
     if not alpha_min < alpha_init < alpha_max:
         raise ValueError("alpha_init must satisfy alpha_min < alpha_init < alpha_max")
-    alpha_init_unit = (alpha_init - alpha_min) / (alpha_max - alpha_min)
-    alpha_init_logit = float(np.log(alpha_init_unit / (1.0 - alpha_init_unit)))
     amplitude_head = TransitionAmplitudeHead2D(
         n_x=n_x, n_y=n_y,
         latent_channels=args.latent_channels,
         hidden_channels=args.amp_head_hidden,
         use_forcing_channel=use_forcing,
         boundary_condition=bc,
-        alpha_init_logit=alpha_init_logit,
+        alpha_init=alpha_init,
     )
     return PeriodicLatentVAE2D(
         encoder=encoder, decoder=decoder,

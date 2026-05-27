@@ -71,8 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers",    type=int, default=0)
     parser.add_argument("--n-plot-samples", type=int,   default=4)
     parser.add_argument("--snapshot-times", type=str,   default="")
-    parser.add_argument("--max-snapshots",  type=int,   default=76,
-                        help="Maximum trajectory snapshots to evaluate. Default: 61 for OOD datasets (T=60), otherwise all.")
+    parser.add_argument("--max-snapshots",  type=int,   default=101,
+                        help="Maximum trajectory snapshots to evaluate. Default: 51 for OOD datasets (T=50), otherwise all.")
     parser.add_argument("--delta-clip",     type=float, default=None,
                         help="Clip predicted increment per step. Default: checkpoint training value; set 0 to disable.")
     parser.add_argument("--cpu",            action="store_true")
