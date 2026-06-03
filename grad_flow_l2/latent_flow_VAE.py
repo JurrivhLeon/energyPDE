@@ -721,7 +721,6 @@ class TransitionAmplitudeHead2D(nn.Module):
         self.use_forcing_channel = bool(use_forcing_channel)
         self.boundary_condition = _normalize_boundary_condition(boundary_condition)
         self.padding_mode = _padding_mode_from_boundary_condition(self.boundary_condition)
-        self.softplus = nn.Softplus()
 
         in_channels = self.latent_channels + (1 if self.use_forcing_channel else 0)
         self.net = nn.Sequential(
@@ -757,10 +756,10 @@ class TransitionAmplitudeHead2D(nn.Module):
 
         h = self.net(torch.cat(feat, dim=1))
         pooled = h.mean(dim=(-2, -1), keepdim=True)
-        alpha_raw = self.out(pooled).view(batch_size)
+        alpha_logit = self.out(pooled).view(batch_size)
         if squeeze:
-            return self.softplus(alpha_raw).squeeze(0)
-        return self.softplus(alpha_raw)
+            return alpha_logit.squeeze(0)
+        return alpha_logit
 
 
 class PeriodicLatentVAE2D(nn.Module):
@@ -835,8 +834,8 @@ class PeriodicLatentVAE2D(nn.Module):
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:
         mu_p = self.transition(z, f, dt=dt)
-        alpha_raw = self.amplitude_head(z, f)
-        alpha = (self.alpha_min + alpha_raw).clamp(max=self.alpha_max)
+        alpha_logit = self.amplitude_head(z, f)
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(alpha_logit)
         prior_logvar_scalar = torch.log(alpha.square() + 1e-12)
         return mu_p, prior_logvar_scalar
 

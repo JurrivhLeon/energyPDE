@@ -287,7 +287,7 @@ class PeriodicLatentVAETrainer2D:
             for k, m in meters.items():
                 m.update(losses[k].item(), bsz)
             if pbar is not None and (batch_idx == 1 or batch_idx % 10 == 0):
-                pbar.set_postfix(total=f"{meters['loss'].avg:.4f}", step=f"{meters['loss_step'].avg:.4f}")
+                pbar.set_postfix(total=f"{meters['loss'].avg:.4f}", alpha=f"{meters['alpha_mean'].avg:.4f}", step=f"{meters['loss_step'].avg:.4f}")
 
         if pbar is not None:
             pbar.close()
