@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enc-blocks", type=int, default=4)
     parser.add_argument("--dec-blocks", type=int, default=4)
     parser.add_argument("--prox-blocks", type=int, default=6)
-    parser.add_argument("--prox-simulator-type", type=str, default="cnn", choices=["cnn", "fno"])
+    parser.add_argument("--prox-simulator-type", type=str, default="fno", choices=["cnn", "fno"])
     parser.add_argument("--fno-modes-x", type=int, default=16)
     parser.add_argument("--fno-modes-y", type=int, default=16)
     parser.add_argument("--disable-fno-grid", action="store_true")
