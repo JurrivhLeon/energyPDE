@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-kl",            type=float, default=1e-4)
     parser.add_argument("--lambda-rec",         type=float, default=1.0)
     parser.add_argument("--noise-corr-length",  type=float, default=1.0)
+    parser.add_argument(
+        "--encoder-noise-corr-length",
+        type=float,
+        default=None,
+        help="Posterior encoder noise correlation length. Defaults to --noise-corr-length.",
+    )
     parser.add_argument("--noise-decay-s",      type=float, default=2.0)
     parser.add_argument("--spectral-var-floor", type=float, default=1e-2)
 
@@ -139,6 +145,7 @@ def _build_model(n_x: int, n_y: int, dt: float,
         encoder=encoder, decoder=decoder,
         transition=transition, amplitude_head=amplitude_head,
         noise_corr_length=args.noise_corr_length,
+        encoder_noise_corr_length=getattr(args, "encoder_noise_corr_length", None),
         noise_decay_s=args.noise_decay_s,
     )
 

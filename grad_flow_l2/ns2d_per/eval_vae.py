@@ -23,7 +23,13 @@ try:
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
-    from .train_vae import PeriodicLatentVAETrainer2D, _build_model, _unpack_traj_batch, rollout_vae_mean
+    from .train_vae import (
+        PeriodicLatentVAETrainer2D,
+        _build_model,
+        _unpack_traj_batch,
+        rollout_vae_latent_mean,
+        rollout_vae_mean,
+    )
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.navier_stokes2d_per_data import (
@@ -34,6 +40,7 @@ except ImportError:
         PeriodicLatentVAETrainer2D,
         _build_model,
         _unpack_traj_batch,
+        rollout_vae_latent_mean,
         rollout_vae_mean,
     )
 
@@ -73,6 +80,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--rollout-mode",
+        type=str,
+        default="physical",
+        choices=["physical", "latent"],
+        help="Rollout path: physical re-encodes each decoded state; latent encodes u0 once and advances in latent space.",
+    )
     parser.add_argument(
         "--delta-clip",
         type=float,
@@ -155,6 +169,7 @@ def _evaluate_rollout_curves(
     area: float,
     delta_clip: float = 0.0,
     state_clip: float = 0.0,
+    rollout_mode: str = "physical",
 ) -> Dict[str, np.ndarray]:
     rel_batches = []
     rel_h1_batches = []
@@ -170,15 +185,25 @@ def _evaluate_rollout_curves(
         f = f.to(device)
         u_ref = u_ref.to(device)
         n_steps = int(u_ref.shape[1] - 1)
-        u_pred = rollout_vae_mean(
-            model,
-            u0=u0,
-            f=f,
-            n_steps=n_steps,
-            dt=dt,
-            delta_clip=delta_clip,
-            state_clip=state_clip,
-        )
+        if rollout_mode == "latent":
+            u_pred = rollout_vae_latent_mean(
+                model,
+                u0=u0,
+                f=f,
+                n_steps=n_steps,
+                dt=dt,
+                state_clip=state_clip,
+            )
+        else:
+            u_pred = rollout_vae_mean(
+                model,
+                u0=u0,
+                f=f,
+                n_steps=n_steps,
+                dt=dt,
+                delta_clip=delta_clip,
+                state_clip=state_clip,
+            )
         diff = u_pred - u_ref
         num = torch.sqrt(area * torch.sum(diff * diff, dim=(-2, -1)))
         den = torch.sqrt(area * torch.sum(u_ref * u_ref, dim=(-2, -1)))
@@ -325,6 +350,7 @@ def _plot_sample_trajectories(
     out_dir: str,
     delta_clip: float = 0.0,
     state_clip: float = 0.0,
+    rollout_mode: str = "physical",
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -347,15 +373,25 @@ def _plot_sample_trajectories(
         u0_i = u0[sample_id : sample_id + 1].to(device)
         f_i = f[sample_id : sample_id + 1].to(device)
         u_ref_i = u_traj[sample_id]
-        u_pred_i = rollout_vae_mean(
-            model,
-            u0_i,
-            f_i,
-            n_steps=n_steps,
-            dt=dt,
-            delta_clip=delta_clip,
-            state_clip=state_clip,
-        )[0].cpu()
+        if rollout_mode == "latent":
+            u_pred_i = rollout_vae_latent_mean(
+                model,
+                u0_i,
+                f_i,
+                n_steps=n_steps,
+                dt=dt,
+                state_clip=state_clip,
+            )[0].cpu()
+        else:
+            u_pred_i = rollout_vae_mean(
+                model,
+                u0_i,
+                f_i,
+                n_steps=n_steps,
+                dt=dt,
+                delta_clip=delta_clip,
+                state_clip=state_clip,
+            )[0].cpu()
 
         diff_i = u_pred_i - u_ref_i
         num_i = torch.sqrt(area * torch.sum(diff_i * diff_i, dim=(-2, -1)))
@@ -508,6 +544,7 @@ def main(args: argparse.Namespace) -> None:
         device=device,
         output_dir=None,
         show_epoch_pbar=False,
+        rollout_mode=args.rollout_mode,
     )
     clips_enabled = (args.delta_clip is not None and float(args.delta_clip) > 0.0) or (
         args.state_clip is not None and float(args.state_clip) > 0.0
@@ -521,6 +558,7 @@ def main(args: argparse.Namespace) -> None:
         area=area,
         delta_clip=args.delta_clip,
         state_clip=args.state_clip,
+        rollout_mode=args.rollout_mode,
     )
     metrics["rollout_rel_l2"] = curves["rollout_rel_mean"]
     metrics["rollout_rel_l2_median"] = curves["rollout_rel_median"]
@@ -540,6 +578,7 @@ def main(args: argparse.Namespace) -> None:
         f"Split: {args.split}, n={int(split['u0'].shape[0])}, grid=({n_x},{n_y}), "
         f"steps={n_steps}, dt={dt:.6f}, stored_time=[{t_start:.6f},{t_final:.6f}]"
     )
+    print(f"Rollout mode: {args.rollout_mode}")
     print(f"Delta clip: {args.delta_clip:.6f}")
     print(f"State clip: {args.state_clip:.6f}")
     print("Metrics:", metrics)
@@ -581,6 +620,7 @@ def main(args: argparse.Namespace) -> None:
         out_dir=sample_dir,
         delta_clip=args.delta_clip,
         state_clip=args.state_clip,
+        rollout_mode=args.rollout_mode,
     )
 
     summary = {
@@ -612,6 +652,7 @@ def main(args: argparse.Namespace) -> None:
         "rel_h1_curve_median": curves["rel_h1_curve_median"].tolist(),
         "snapshot_times": snapshot_times,
         "deterministic_dynamics": True,
+        "rollout_mode": args.rollout_mode,
         "delta_clip": float(args.delta_clip),
         "state_clip": float(args.state_clip),
         "max_steps": args.max_steps,

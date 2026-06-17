@@ -466,6 +466,7 @@ class LatentVAE1D(nn.Module):
         amplitude_head: TransitionAmplitudeHead1D,
         noise_corr_length: float = 1.0,
         noise_decay_s: float = 2.0,
+        encoder_noise_corr_length: float | None = None,
         alpha_is_bounded: bool = True,
         alpha_min: float = 1e-4,
         alpha_max: float = 0.5,
@@ -473,6 +474,10 @@ class LatentVAE1D(nn.Module):
         super().__init__()
         if noise_corr_length <= 0.0:
             raise ValueError("noise_corr_length must be > 0")
+        if encoder_noise_corr_length is None:
+            encoder_noise_corr_length = noise_corr_length
+        if encoder_noise_corr_length <= 0.0:
+            raise ValueError("encoder_noise_corr_length must be > 0")
         if noise_decay_s <= 0.0:
             raise ValueError("noise_decay_s must be > 0")
         self.encoder = encoder
@@ -480,6 +485,7 @@ class LatentVAE1D(nn.Module):
         self.transition = transition
         self.amplitude_head = amplitude_head
         self.noise_corr_length = float(noise_corr_length)
+        self.encoder_noise_corr_length = float(encoder_noise_corr_length)
         self.noise_decay_s = float(noise_decay_s)
         self.alpha_is_bounded = bool(alpha_is_bounded)
         if self.alpha_is_bounded:
@@ -502,19 +508,26 @@ class LatentVAE1D(nn.Module):
     def sample_posterior(self, mu_q: torch.Tensor, logvar_q: torch.Tensor) -> torch.Tensor:
         logvar_q = torch.clamp(logvar_q, min=-8.0, max=2.0)
         std = torch.exp(0.5 * logvar_q)
-        return mu_q + std * torch.randn_like(std)
+        noise = self._filtered_noise(
+            mu_q.shape,
+            device=mu_q.device,
+            dtype=mu_q.dtype,
+            noise_corr_length=self.encoder_noise_corr_length,
+        )
+        return mu_q + std * noise
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         return self.decoder(z)
 
-    def _spectral_filter(self, device, dtype) -> torch.Tensor:
+    def _spectral_filter(self, device, dtype, noise_corr_length: float | None = None) -> torch.Tensor:
+        corr_length = self.noise_corr_length if noise_corr_length is None else float(noise_corr_length)
         k = 2.0 * torch.pi * torch.fft.rfftfreq(self.n_x, d=1.0 / float(self.n_x), device=device).to(dtype=dtype)
-        return (1.0 + (self.noise_corr_length ** 2) * k.square()).pow(-0.5 * self.noise_decay_s)
+        return (1.0 + (corr_length ** 2) * k.square()).pow(-0.5 * self.noise_decay_s)
 
-    def _filtered_noise(self, shape: Tuple[int, int, int], device, dtype) -> torch.Tensor:
+    def _filtered_noise(self, shape: Tuple[int, int, int], device, dtype, noise_corr_length: float | None = None) -> torch.Tensor:
         xi = torch.randn(shape, device=device, dtype=dtype)
         xi_hat = torch.fft.rfft(xi, dim=-1, norm="ortho")
-        filt = self._spectral_filter(device=device, dtype=dtype).view(1, 1, -1)
+        filt = self._spectral_filter(device=device, dtype=dtype, noise_corr_length=noise_corr_length).view(1, 1, -1)
         return torch.fft.irfft(xi_hat * filt, n=self.n_x, dim=-1, norm="ortho")
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -839,6 +852,7 @@ class PeriodicLatentVAE2D(nn.Module):
         amplitude_head: TransitionAmplitudeHead2D,
         noise_corr_length: float = 1.0,
         noise_decay_s: float = 2.0,
+        encoder_noise_corr_length: float | None = None,
         alpha_min: float = 1e-4,
         alpha_max: float = 0.5,
         transition_noise_scale: float = 1.0,
@@ -846,6 +860,10 @@ class PeriodicLatentVAE2D(nn.Module):
         super().__init__()
         if noise_corr_length <= 0.0:
             raise ValueError("noise_corr_length must be > 0")
+        if encoder_noise_corr_length is None:
+            encoder_noise_corr_length = noise_corr_length
+        if encoder_noise_corr_length <= 0.0:
+            raise ValueError("encoder_noise_corr_length must be > 0")
         if noise_decay_s <= 0.0:
             raise ValueError("noise_decay_s must be > 0")
 
@@ -854,6 +872,7 @@ class PeriodicLatentVAE2D(nn.Module):
         self.transition = transition
         self.amplitude_head = amplitude_head
         self.noise_corr_length = float(noise_corr_length)
+        self.encoder_noise_corr_length = float(encoder_noise_corr_length)
         self.noise_decay_s = float(noise_decay_s)
         self.alpha_min = float(alpha_min)
         self.alpha_max = float(alpha_max)
@@ -881,23 +900,29 @@ class PeriodicLatentVAE2D(nn.Module):
     def sample_posterior(self, mu_q: torch.Tensor, logvar_q: torch.Tensor) -> torch.Tensor:
         logvar_q = torch.clamp(logvar_q, min=-8.0, max=2.0)
         std = torch.exp(0.5 * logvar_q)
-        eps = torch.randn_like(std)
-        return mu_q + std * eps
+        noise = self._filtered_noise(
+            mu_q.shape,
+            device=mu_q.device,
+            dtype=mu_q.dtype,
+            noise_corr_length=self.encoder_noise_corr_length,
+        )
+        return mu_q + std * noise
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         return self.decoder(z)
 
-    def _spectral_filter(self, device, dtype) -> torch.Tensor:
+    def _spectral_filter(self, device, dtype, noise_corr_length: float | None = None) -> torch.Tensor:
+        corr_length = self.noise_corr_length if noise_corr_length is None else float(noise_corr_length)
         kx = 2.0 * torch.pi * torch.fft.fftfreq(self.n_x, d=1.0 / float(self.n_x), device=device).to(dtype=dtype)
         ky = 2.0 * torch.pi * torch.fft.rfftfreq(self.n_y, d=1.0 / float(self.n_y), device=device).to(dtype=dtype)
         kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
         radius_sq = kx_grid.square() + ky_grid.square()
-        return (1.0 + (self.noise_corr_length ** 2) * radius_sq).pow(-0.5 * self.noise_decay_s)
+        return (1.0 + (corr_length ** 2) * radius_sq).pow(-0.5 * self.noise_decay_s)
 
-    def _filtered_noise(self, shape: Tuple[int, int, int, int], device, dtype) -> torch.Tensor:
+    def _filtered_noise(self, shape: Tuple[int, int, int, int], device, dtype, noise_corr_length: float | None = None) -> torch.Tensor:
         xi = torch.randn(shape, device=device, dtype=dtype)
         xi_hat = torch.fft.rfft2(xi, dim=(-2, -1), norm="ortho")
-        filt = self._spectral_filter(device=device, dtype=dtype).unsqueeze(0).unsqueeze(0)
+        filt = self._spectral_filter(device=device, dtype=dtype, noise_corr_length=noise_corr_length).unsqueeze(0).unsqueeze(0)
         return torch.fft.irfft2(xi_hat * filt, s=(self.n_x, self.n_y), dim=(-2, -1), norm="ortho")
 
     def prior_stats(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor]:

@@ -154,6 +154,49 @@ def rollout_vae_mean(
     return traj
 
 
+def rollout_vae_latent_mean(
+    model: PeriodicLatentVAE2D,
+    u0: torch.Tensor,
+    f: torch.Tensor,
+    n_steps: int,
+    dt: float,
+    state_clip: Optional[float] = None,
+) -> torch.Tensor:
+    squeeze = False
+    if u0.dim() == 2:
+        u0 = u0.unsqueeze(0)
+        f = f.unsqueeze(0)
+        squeeze = True
+
+    z, _ = model.encode_stats(u0)
+    latent_states = [z]
+    for _ in range(n_steps):
+        z_next = model.transition(z, f, dt=dt)
+        finite = torch.isfinite(z_next).flatten(1).all(dim=1)
+        z = torch.where(finite[:, None, None, None], z_next, z)
+        latent_states.append(z)
+
+    z_traj = torch.stack(latent_states, dim=1)
+    batch_size, traj_len, latent_channels, n_x, n_y = z_traj.shape
+    traj = model.decode(z_traj.reshape(batch_size * traj_len, latent_channels, n_x, n_y))
+    traj = traj.reshape(batch_size, traj_len, n_x, n_y)
+
+    finite = torch.isfinite(traj).flatten(2).all(dim=2)
+    previous = traj[:, 0]
+    states = [previous]
+    for step in range(1, traj_len):
+        u_next = torch.where(finite[:, step, None, None], traj[:, step], previous)
+        if state_clip is not None and float(state_clip) > 0.0:
+            u_next = torch.clamp(u_next, min=-float(state_clip), max=float(state_clip))
+        previous = u_next
+        states.append(u_next)
+
+    traj = torch.stack(states, dim=1)
+    if squeeze:
+        return traj.squeeze(0)
+    return traj
+
+
 class PeriodicLatentVAETrainer2D:
     def __init__(
         self,
@@ -175,6 +218,7 @@ class PeriodicLatentVAETrainer2D:
         device: str = "cpu",
         output_dir: Optional[str] = None,
         show_epoch_pbar: bool = True,
+        rollout_mode: str = "physical",
     ):
         self.model = model.to(device)
         self.dt = float(dt)
@@ -192,6 +236,9 @@ class PeriodicLatentVAETrainer2D:
         self.device = device
         self.output_dir = output_dir
         self.show_epoch_pbar = bool(show_epoch_pbar)
+        self.rollout_mode = rollout_mode.strip().lower()
+        if self.rollout_mode not in {"physical", "latent"}:
+            raise ValueError("rollout_mode must be one of {physical, latent}")
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = torch.optim.lr_scheduler.StepLR(
@@ -327,7 +374,8 @@ class PeriodicLatentVAETrainer2D:
                 u_ref = u_ref.to(self.device)
 
                 n_steps = int(u_ref.shape[1] - 1)
-                u_pred = rollout_vae_mean(self.model, u0=u0, f=f, n_steps=n_steps, dt=self.dt)
+                rollout_fn = rollout_vae_latent_mean if self.rollout_mode == "latent" else rollout_vae_mean
+                u_pred = rollout_fn(self.model, u0=u0, f=f, n_steps=n_steps, dt=self.dt)
                 rel = relative_l2_error_2d(u_pred, u_ref, area=self.area)
                 rollout_rel_meter.update(rel.mean(dim=-1).mean().item(), int(u0.shape[0]))
                 rollout_mse_meter.update(F.mse_loss(u_pred, u_ref).item(), int(u0.shape[0]))
@@ -364,6 +412,7 @@ class PeriodicLatentVAETrainer2D:
                 "alpha_min": self.alpha_min,
                 "alpha_max": self.alpha_max,
                 "lr": self.optimizer.param_groups[0]["lr"],
+                "rollout_mode": self.rollout_mode,
             },
             os.path.join(self.output_dir, name),
         )
@@ -478,6 +527,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-kl", type=float, default=1e-4)
     parser.add_argument("--lambda-rec", type=float, default=1.0)
     parser.add_argument("--noise-corr-length", type=float, default=1.0)
+    parser.add_argument(
+        "--encoder-noise-corr-length",
+        type=float,
+        default=0.05,
+        help="Posterior encoder noise correlation length. Defaults to --noise-corr-length.",
+    )
     parser.add_argument("--noise-decay-s", type=float, default=2.0)
     parser.add_argument(
         "--spectral-var-floor",
@@ -505,6 +560,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--no-epoch-pbar", action="store_true", help="Disable per-epoch batch progress bar.")
+    parser.add_argument(
+        "--rollout-mode",
+        type=str,
+        default="physical",
+        choices=["physical", "latent"],
+        help="Validation rollout: physical re-encodes each decoded state; latent encodes u0 once and advances in latent space.",
+    )
     parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs_vae")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -569,6 +631,7 @@ def _build_model(n_x: int, n_y: int, dt: float, args: argparse.Namespace) -> Per
         amplitude_head=amplitude_head,
         noise_corr_length=args.noise_corr_length,
         noise_decay_s=args.noise_decay_s,
+        encoder_noise_corr_length=getattr(args, "encoder_noise_corr_length", None),
         alpha_min=alpha_min,
         alpha_max=alpha_max,
     )
@@ -717,6 +780,7 @@ def main(args: argparse.Namespace) -> None:
         device=device,
         output_dir=run_dir,
         show_epoch_pbar=not args.no_epoch_pbar,
+        rollout_mode=args.rollout_mode,
     )
 
     if args.dry_run:
@@ -733,8 +797,11 @@ def main(args: argparse.Namespace) -> None:
         f"beta_kl={args.beta_kl}, lambda_rec={args.lambda_rec}, "
         f"fno_width={args.hidden_channels if args.fno_width is None else args.fno_width}, "
         f"fno_layers={args.fno_layers}, fno_modes=({args.fno_modes_x},{args.fno_modes_y}), "
-        f"noise_corr_length={args.noise_corr_length}, noise_decay_s={args.noise_decay_s}, "
+        f"noise_corr_length={args.noise_corr_length}, "
+        f"encoder_noise_corr_length={args.encoder_noise_corr_length}, "
+        f"noise_decay_s={args.noise_decay_s}, "
         f"spectral_var_floor={args.spectral_var_floor}, "
+        f"rollout_mode={args.rollout_mode}, "
         f"epoch_pbar={not args.no_epoch_pbar}, output={run_dir}"
     )
     history = trainer.fit(

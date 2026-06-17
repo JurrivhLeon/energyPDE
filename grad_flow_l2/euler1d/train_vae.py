@@ -115,6 +115,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-u-grad-feature", action="store_true")
     p.add_argument("--amp-head-hidden", type=int, default=32)
     p.add_argument("--noise-corr-length", type=float, default=1.0)
+    p.add_argument(
+        "--encoder-noise-corr-length",
+        type=float,
+        default=None,
+        help="Posterior encoder noise correlation length. Defaults to --noise-corr-length.",
+    )
     p.add_argument("--noise-decay-s", type=float, default=2.0)
     p.add_argument("--alpha-unbounded", action="store_true")
     p.add_argument("--alpha-min", type=float, default=1e-4)
@@ -195,6 +201,7 @@ def _build_model(
         transition=transition,
         amplitude_head=amp,
         noise_corr_length=args.noise_corr_length,
+        encoder_noise_corr_length=getattr(args, "encoder_noise_corr_length", None),
         noise_decay_s=args.noise_decay_s,
         alpha_is_bounded=alpha_is_bounded,
         alpha_min=args.alpha_min,
