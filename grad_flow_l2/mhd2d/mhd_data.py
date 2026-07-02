@@ -20,8 +20,8 @@ from torch.utils.data import Dataset
 
 try:
     from ..heat_data import save_dataset_splits
-    from ..navier_stokes2d_per_data import sample_periodic_field_mixed_2d
-    from ..navier_stokes2d_per_solver import (
+    from ..ns2d_per.ns2d_data import sample_periodic_field_mixed_2d
+    from ..ns2d_per.ns2d_solver import (
         sample_periodic_gaussian_field_2d,
         spectral_truncate_periodic_field_2d,
     )
@@ -33,8 +33,8 @@ try:
     )
 except ImportError:
     from grad_flow_l2.heat_data import save_dataset_splits
-    from grad_flow_l2.navier_stokes2d_per_data import sample_periodic_field_mixed_2d
-    from grad_flow_l2.navier_stokes2d_per_solver import (
+    from grad_flow_l2.ns2d_per.ns2d_data import sample_periodic_field_mixed_2d
+    from grad_flow_l2.ns2d_per.ns2d_solver import (
         sample_periodic_gaussian_field_2d,
         spectral_truncate_periodic_field_2d,
     )

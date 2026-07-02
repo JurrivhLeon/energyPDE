@@ -24,6 +24,7 @@ try:
         StateDecoder2D,
         StateEncoder2D,
     )
+    from ..latent_markov_trainer import rollout_latent_markov_latent_2d
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.latent_markov import (
@@ -33,6 +34,7 @@ except ImportError:
         StateDecoder2D,
         StateEncoder2D,
     )
+    from grad_flow_l2.latent_markov_trainer import rollout_latent_markov_latent_2d
 
 
 def set_seed(seed: int, seed_cuda: bool = False) -> None:
@@ -55,6 +57,13 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=10.0,
         help="L-infinity clip applied to the predicted increment delta = u_tilde - u_t before accumulation.",
+    )
+    parser.add_argument(
+        "--rollout-mode",
+        type=str,
+        default="physical",
+        choices=["physical", "latent"],
+        help="Rollout path: physical re-encodes each decoded state; latent encodes u0 once and advances in latent space.",
     )
     parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs/eval")
     parser.add_argument("--seed", type=int, default=42)
@@ -201,7 +210,13 @@ def _rollout(
     n_steps: int,
     dt: float,
     delta_clip: float = 10.0,
+    rollout_mode: str = "physical",
 ) -> torch.Tensor:
+    if rollout_mode == "latent":
+        return rollout_latent_markov_latent_2d(model, u0=u0, f=f, n_steps=n_steps, dt=dt)
+    if rollout_mode != "physical":
+        raise ValueError("rollout_mode must be one of {physical, latent}")
+
     states = [u0]
     u = u0
     for _ in range(n_steps):
@@ -253,6 +268,7 @@ def _evaluate_rollout_rel_l2(
     dt: float,
     area: float,
     delta_clip: float,
+    rollout_mode: str = "physical",
 ) -> float:
     u0 = split["u0"].to(device)
     f = split["f"].to(device)
@@ -265,6 +281,7 @@ def _evaluate_rollout_rel_l2(
         n_steps=n_steps,
         dt=dt,
         delta_clip=delta_clip,
+        rollout_mode=rollout_mode,
     )
     diff = u_pred - u_ref
     num = torch.sqrt(area * torch.sum(diff * diff, dim=(-2, -1)))
@@ -281,6 +298,7 @@ def _evaluate_rollout_curves(
     dt: float,
     area: float,
     delta_clip: float,
+    rollout_mode: str = "physical",
 ) -> Dict[str, np.ndarray]:
     rel_batches = []
     rel_h1_batches = []
@@ -301,6 +319,7 @@ def _evaluate_rollout_curves(
         n_steps=n_steps,
         dt=dt,
         delta_clip=delta_clip,
+        rollout_mode=rollout_mode,
     )
     diff = u_pred - u_ref
     num = torch.sqrt(area * torch.sum(diff * diff, dim=(-2, -1)))
@@ -460,6 +479,7 @@ def _plot_test_samples(
     n_plot_samples: int,
     out_dir: str,
     delta_clip: float,
+    rollout_mode: str = "physical",
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -495,6 +515,7 @@ def _plot_test_samples(
             n_steps=n_steps,
             dt=dt,
             delta_clip=delta_clip,
+            rollout_mode=rollout_mode,
         )[0].cpu()
         diff_i = u_pred_i - u_ref_i
         num_i = torch.sqrt(area * torch.sum(diff_i * diff_i, dim=(-2, -1)))
@@ -640,6 +661,7 @@ def main(args: argparse.Namespace) -> None:
         f"stored_time=[{t_start:.6f},{t_final:.6f}], dt={dt:.6f}"
     )
     print(f"Delta clip (L-inf): {args.delta_clip:.6f}")
+    print(f"Rollout mode: {args.rollout_mode}")
 
     model = _build_model(n_x=n_x, n_y=n_y, h_x=h_x, h_y=h_y, dt=dt, args=args).to(device)
     ckpt = _load_checkpoint(args.checkpoint_path, map_location=device)
@@ -655,6 +677,7 @@ def main(args: argparse.Namespace) -> None:
         dt=dt,
         area=area,
         delta_clip=args.delta_clip,
+        rollout_mode=args.rollout_mode,
     )
     rel_curve_mean = curves["rel_curve_mean"]
     rel_curve_median = curves["rel_curve_median"]
@@ -711,6 +734,7 @@ def main(args: argparse.Namespace) -> None:
         n_plot_samples=args.n_plot_samples,
         out_dir=sample_dir,
         delta_clip=args.delta_clip,
+        rollout_mode=args.rollout_mode,
     )
 
     summary = {
@@ -725,6 +749,7 @@ def main(args: argparse.Namespace) -> None:
         "t_final": t_final,
         "time_values": time_values.tolist(),
         "delta_clip": args.delta_clip,
+        "rollout_mode": args.rollout_mode,
         "step_mse": step_mse,
         "rollout_rel_l2": curves["rollout_rel_mean"],
         "rollout_rel_l2_median": curves["rollout_rel_median"],

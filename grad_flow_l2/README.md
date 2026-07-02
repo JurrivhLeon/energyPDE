@@ -7,8 +7,8 @@ Now also includes 2D benchmarks:
 - 2D Cahn-Hilliard with homogeneous Neumann BC (new)
 
 Periodic Navier-Stokes data generation is available via:
-- `python -m grad_flow_l2.navier_stokes2d_per_data --help`
-- `python -m grad_flow_l2.navier_stokes2d_per_solver --help`
+- `python -m grad_flow_l2.ns2d_per.ns2d_data --help`
+- `python -m grad_flow_l2.ns2d_per.ns2d_solver --help`
 - `python -m grad_flow_l2.ns2d_per.train --help`
 - `python -m grad_flow_l2.ns2d_per.eval --help`
 - `python -m grad_flow_l2.ns2d_per.eval_edi --help`

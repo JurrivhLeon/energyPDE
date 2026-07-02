@@ -33,7 +33,7 @@ try:
     )
     from ..latent_markov import StateDecoder2D
     from ..latent_markov_trainer import relative_l2_error_2d
-    from ..navier_stokes2d_per_data import (
+    from .ns2d_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
@@ -47,7 +47,7 @@ except ImportError:
     )
     from grad_flow_l2.latent_markov import StateDecoder2D
     from grad_flow_l2.latent_markov_trainer import relative_l2_error_2d
-    from grad_flow_l2.navier_stokes2d_per_data import (
+    from grad_flow_l2.ns2d_per.ns2d_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
@@ -509,6 +509,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-test", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--train-t-start",
+        type=float,
+        default=None,
+        help="Optional first physical time kept from stored trajectories for training/validation.",
+    )
+    parser.add_argument(
+        "--train-t-end",
+        type=float,
+        default=None,
+        help="Optional last physical time kept from stored trajectories for training/validation.",
+    )
 
     parser.add_argument("--hidden-channels", type=int, default=64)
     parser.add_argument("--latent-channels", type=int, default=16)
@@ -563,13 +575,51 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rollout-mode",
         type=str,
-        default="physical",
+        default="latent",
         choices=["physical", "latent"],
         help="Validation rollout: physical re-encodes each decoded state; latent encodes u0 once and advances in latent space.",
     )
     parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs_vae")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
+
+
+def _slice_time_window(
+    split: dict,
+    time_values: np.ndarray,
+    t_start: float | None,
+    t_end: float | None,
+    split_name: str,
+) -> tuple[dict, np.ndarray, tuple[int, int]]:
+    if t_start is None and t_end is None:
+        return split, time_values, (0, int(time_values.shape[0] - 1))
+
+    start = float(time_values[0]) if t_start is None else float(t_start)
+    end = float(time_values[-1]) if t_end is None else float(t_end)
+    tol = 1e-8 + 1e-6 * max(1.0, abs(float(time_values[-1] - time_values[0])))
+    if start < float(time_values[0]) - tol or end > float(time_values[-1]) + tol:
+        raise ValueError(
+            f"Requested time window [{start},{end}] is outside stored range "
+            f"[{float(time_values[0])},{float(time_values[-1])}]"
+        )
+    if end <= start:
+        raise ValueError(f"--train-t-end must be greater than --train-t-start, got [{start},{end}]")
+
+    i0 = int(np.searchsorted(time_values, start - tol, side="left"))
+    i1 = int(np.searchsorted(time_values, end + tol, side="right") - 1)
+    i0 = max(0, min(i0, int(time_values.shape[0] - 1)))
+    i1 = max(0, min(i1, int(time_values.shape[0] - 1)))
+    if i1 <= i0:
+        raise ValueError(
+            f"Time window [{start},{end}] for {split_name} keeps fewer than two snapshots; "
+            f"nearest indices are {i0}:{i1}"
+        )
+
+    u_traj = split["u_traj"][:, i0 : i1 + 1]
+    sliced = dict(split)
+    sliced["u_traj"] = u_traj
+    sliced["u0"] = u_traj[:, 0].clone()
+    return sliced, time_values[i0 : i1 + 1], (i0, i1)
 
 
 def _build_model(n_x: int, n_y: int, dt: float, args: argparse.Namespace) -> PeriodicLatentVAE2D:
@@ -699,12 +749,40 @@ def main(args: argparse.Namespace) -> None:
     h_x = 1.0 / float(n_x)
     h_y = 1.0 / float(n_y)
     dt = float(meta.get("record_dt", stored_horizon / float(n_steps)))
+    time_values_full = t_start + np.arange(n_steps + 1, dtype=np.float64) * dt
+    train_split, time_values, window_idx = _slice_time_window(
+        train_split,
+        time_values_full,
+        t_start=args.train_t_start,
+        t_end=args.train_t_end,
+        split_name="train",
+    )
+    val_split, _, _ = _slice_time_window(
+        val_split,
+        time_values_full,
+        t_start=args.train_t_start,
+        t_end=args.train_t_end,
+        split_name="val",
+    )
+    test_split, _, _ = _slice_time_window(
+        test_split,
+        time_values_full,
+        t_start=args.train_t_start,
+        t_end=args.train_t_end,
+        split_name="test",
+    )
+    n_steps_full = n_steps
+    n_steps = int(train_split["u_traj"].shape[1] - 1)
+    t_window_start = float(time_values[0])
+    t_window_end = float(time_values[-1])
 
     print(f"Device: {device}")
     print(f"Loaded dataset: {args.dataset_path}")
     print(
         f"Grid from data: n_x={n_x}, n_y={n_y}, n_steps={n_steps}, "
-        f"stored_time=[{t_start:.6f},{t_start + dt * n_steps:.6f}], dt={dt:.6f}"
+        f"stored_time=[{t_start:.6f},{t_start + dt * n_steps_full:.6f}], dt={dt:.6f}, "
+        f"train_time=[{t_window_start:.6f},{t_window_end:.6f}] "
+        f"(indices {window_idx[0]}:{window_idx[1]} of {n_steps_full})"
     )
 
     train_step_ds = build_navier_stokes2d_periodic_step_dataset(train_split)
@@ -760,8 +838,18 @@ def main(args: argparse.Namespace) -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(args.output_dir, f"run_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
+    args_dict = vars(args).copy()
+    args_dict.update(
+        {
+            "train_time_start_used": t_window_start,
+            "train_time_end_used": t_window_end,
+            "train_time_index_start": int(window_idx[0]),
+            "train_time_index_end": int(window_idx[1]),
+            "train_steps_used": int(n_steps),
+        }
+    )
     with open(os.path.join(run_dir, "args.json"), "w", encoding="utf-8") as f:
-        json.dump(vars(args), f, indent=2)
+        json.dump(args_dict, f, indent=2)
 
     trainer = PeriodicLatentVAETrainer2D(
         model=model,
@@ -802,7 +890,8 @@ def main(args: argparse.Namespace) -> None:
         f"noise_decay_s={args.noise_decay_s}, "
         f"spectral_var_floor={args.spectral_var_floor}, "
         f"rollout_mode={args.rollout_mode}, "
-        f"epoch_pbar={not args.no_epoch_pbar}, output={run_dir}"
+        f"epoch_pbar={not args.no_epoch_pbar}, "
+        f"train_time=[{t_window_start:.6f},{t_window_end:.6f}], output={run_dir}"
     )
     history = trainer.fit(
         train_step_loader=train_step_loader,

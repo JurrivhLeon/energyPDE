@@ -26,8 +26,8 @@ import torch
 from torch.utils.data import Dataset
 
 try:
-    from .heat_data import save_dataset_splits
-    from .navier_stokes2d_per_solver import (
+    from ..heat_data import save_dataset_splits
+    from .ns2d_solver import (
         project_zero_mean_2d,
         sample_periodic_gaussian_field_2d,
         solve_navier_stokes_vorticity_trajectory_pseudospectral,
@@ -35,7 +35,7 @@ try:
     )
 except ImportError:
     from grad_flow_l2.heat_data import save_dataset_splits
-    from grad_flow_l2.navier_stokes2d_per_solver import (
+    from grad_flow_l2.ns2d_per.ns2d_solver import (
         project_zero_mean_2d,
         sample_periodic_gaussian_field_2d,
         solve_navier_stokes_vorticity_trajectory_pseudospectral,

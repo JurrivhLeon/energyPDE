@@ -1,6 +1,4 @@
-"""
-Trainer for energy-free 2D latent Markov models on Navier-Stokes data.
-"""
+"""Training utilities for physical-space 2D FNO steppers."""
 
 from __future__ import annotations
 
@@ -47,139 +45,101 @@ def _unpack_traj_batch(batch):
     raise ValueError("Trajectory batch must be dict with keys u0,f,u_traj or tuple/list (u0,f,u_traj)")
 
 
-def rollout_latent_markov_2d(
-    model,
-    u0: torch.Tensor,
-    f: torch.Tensor,
-    n_steps: int,
-    dt: float,
-    delta_clip: Optional[float] = None,
-) -> torch.Tensor:
-    squeeze = False
-    if u0.dim() == 2:
-        u0 = u0.unsqueeze(0)
-        f = f.unsqueeze(0)
-        squeeze = True
-
-    states = [u0]
-    u = u0
-    for _ in range(n_steps):
-        u_tilde = model.predict_step(u, f, dt=dt)
-        delta = u_tilde - u
-        if delta_clip is not None and float(delta_clip) > 0.0:
-            delta = torch.clamp(delta, min=-float(delta_clip), max=float(delta_clip))
-        u = u + delta
-        finite = torch.isfinite(u).flatten(1).all(dim=1)
-        u = torch.where(finite[:, None, None], u, states[-1])
-        states.append(u)
-
-    traj = torch.stack(states, dim=1)
-    if squeeze:
-        return traj.squeeze(0)
-    return traj
+def _state_channel_dim(u: torch.Tensor) -> Optional[int]:
+    if u.dim() in {4, 5}:
+        return -3
+    return None
 
 
-def rollout_latent_markov_latent_2d(
-    model,
-    u0: torch.Tensor,
-    f: torch.Tensor,
-    n_steps: int,
-    dt: float,
-) -> torch.Tensor:
-    squeeze = False
-    if u0.dim() == 2:
-        u0 = u0.unsqueeze(0)
-        f = f.unsqueeze(0)
-        squeeze = True
-
-    z = model.encode(u0)
-    latent_states = [z]
-    for _ in range(n_steps):
-        z_next = model.predict_latent_step(z, f, dt=dt)
-        finite = torch.isfinite(z_next).flatten(1).all(dim=1)
-        z = torch.where(finite[:, None, None, None], z_next, z)
-        latent_states.append(z)
-
-    z_traj = torch.stack(latent_states, dim=1)
-    batch_size, traj_len, latent_channels, n_x, n_y = z_traj.shape
-    traj = model.decode(z_traj.reshape(batch_size * traj_len, latent_channels, n_x, n_y))
-    traj = traj.reshape(batch_size, traj_len, n_x, n_y)
-
-    finite = torch.isfinite(traj).flatten(2).all(dim=2)
-    previous = traj[:, 0]
-    states = [previous]
-    for step in range(1, traj_len):
-        u_next = torch.where(finite[:, step, None, None], traj[:, step], previous)
-        previous = u_next
-        states.append(u_next)
-
-    traj = torch.stack(states, dim=1)
-    if squeeze:
-        return traj.squeeze(0)
-    return traj
+def _channel_weights(channel_weights, tensor: torch.Tensor) -> Optional[torch.Tensor]:
+    if channel_weights is None:
+        return None
+    w = torch.as_tensor(channel_weights, device=tensor.device, dtype=tensor.dtype)
+    if w.dim() != 1:
+        raise ValueError("channel_weights must be 1D")
+    return w
 
 
-def relative_l2_error_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, area: float) -> torch.Tensor:
-    diff = u_pred - u_ref
-    num = torch.sqrt(float(area) * torch.sum(diff * diff, dim=(-2, -1)))
-    den = torch.sqrt(float(area) * torch.sum(u_ref * u_ref, dim=(-2, -1)))
-    return num / (den + 1e-8)
-
-
-def relative_spectral_hs_error_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, s: float) -> torch.Tensor:
+def channel_weighted_mse(u_pred: torch.Tensor, u_ref: torch.Tensor, channel_weights=None) -> torch.Tensor:
     if u_pred.shape != u_ref.shape:
         raise ValueError(f"u_pred and u_ref must have identical shape, got {tuple(u_pred.shape)} vs {tuple(u_ref.shape)}")
-    if u_pred.dim() < 2:
-        raise ValueError(f"Expected tensors with at least 2 spatial dimensions, got {tuple(u_pred.shape)}")
-
-    n_x = int(u_pred.shape[-2])
-    n_y = int(u_pred.shape[-1])
-    diff_hat = torch.fft.fft2(u_pred - u_ref, dim=(-2, -1), norm="ortho")
-    ref_hat = torch.fft.fft2(u_ref, dim=(-2, -1), norm="ortho")
-
-    real_dtype = u_pred.real.dtype
-    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u_pred.device).to(dtype=real_dtype)
-    ky = 2.0 * torch.pi * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u_pred.device).to(dtype=real_dtype)
-    kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
-    weight = (1.0 + kx_grid.square() + ky_grid.square()).pow(float(s))
-
-    diff_power = diff_hat.real.square() + diff_hat.imag.square()
-    ref_power = ref_hat.real.square() + ref_hat.imag.square()
-    num = torch.sqrt(torch.sum(diff_power * weight, dim=(-2, -1)))
-    den = torch.sqrt(torch.sum(ref_power * weight, dim=(-2, -1)))
-    return num / (den + 1e-8)
+    w = _channel_weights(channel_weights, u_pred)
+    if w is None:
+        return F.mse_loss(u_pred, u_ref)
+    if u_pred.dim() not in {4, 5}:
+        if int(w.numel()) != 1:
+            raise ValueError("scalar states require exactly one channel weight")
+        return F.mse_loss(u_pred, u_ref) * w[0]
+    if int(w.numel()) != int(u_pred.shape[-3]):
+        raise ValueError(f"channel_weights has {w.numel()} entries for {u_pred.shape[-3]} channels")
+    view_shape = [1] * u_pred.dim()
+    view_shape[-3] = int(w.numel())
+    return ((u_pred - u_ref).square() * w.view(*view_shape)).mean()
 
 
 def spectral_sobolev_loss_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, s: float) -> torch.Tensor:
     if u_pred.shape != u_ref.shape:
         raise ValueError(f"u_pred and u_ref must have identical shape, got {tuple(u_pred.shape)} vs {tuple(u_ref.shape)}")
-    if u_pred.dim() != 3:
-        raise ValueError(f"Expected tensors with shape (batch,n_x,n_y), got {tuple(u_pred.shape)}")
-
-    n_x = int(u_pred.shape[-2])
-    n_y = int(u_pred.shape[-1])
-    diff_hat = torch.fft.rfft2(u_pred - u_ref, dim=(-2, -1), norm="ortho")
-
-    real_dtype = u_pred.real.dtype
-    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u_pred.device).to(dtype=real_dtype)
-    ky = 2.0 * torch.pi * torch.fft.rfftfreq(n_y, d=1.0 / float(n_y), device=u_pred.device).to(dtype=real_dtype)
+    diff = u_pred - u_ref
+    n_x = int(diff.shape[-2])
+    n_y = int(diff.shape[-1])
+    diff_hat = torch.fft.rfft2(diff, dim=(-2, -1), norm="ortho")
+    real_dtype = diff.real.dtype
+    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=diff.device).to(dtype=real_dtype)
+    ky = 2.0 * torch.pi * torch.fft.rfftfreq(n_y, d=1.0 / float(n_y), device=diff.device).to(dtype=real_dtype)
     kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
     weight = (1.0 + kx_grid.square() + ky_grid.square()).pow(float(s))
-
     power = diff_hat.real.square() + diff_hat.imag.square()
-    return (power * weight.unsqueeze(0)).mean()
+    return (power * weight).mean()
 
 
-class LatentMarkovTrainer2D:
+def relative_l2_error_2d(u_pred: torch.Tensor, u_ref: torch.Tensor, area: float) -> torch.Tensor:
+    if u_pred.shape != u_ref.shape:
+        raise ValueError(f"u_pred and u_ref must have identical shape, got {tuple(u_pred.shape)} vs {tuple(u_ref.shape)}")
+    diff = u_pred - u_ref
+    if u_pred.dim() == 5:
+        reduce_dims = (-3, -2, -1)
+    else:
+        reduce_dims = (-2, -1)
+    num = torch.sqrt(float(area) * torch.sum(diff * diff, dim=reduce_dims))
+    den = torch.sqrt(float(area) * torch.sum(u_ref * u_ref, dim=reduce_dims))
+    return num / (den + 1e-8)
+
+
+@torch.no_grad()
+def rollout_fno_2d(
+    model,
+    u0: torch.Tensor,
+    f: torch.Tensor | None,
+    n_steps: int,
+    dt: float,
+    delta_clip: Optional[float] = None,
+) -> torch.Tensor:
+    states = [u0]
+    u = u0
+    for _ in range(int(n_steps)):
+        u_tilde = model.predict_step(u, f, dt=dt)
+        delta = u_tilde - u
+        if delta_clip is not None and float(delta_clip) > 0.0:
+            delta = torch.clamp(delta, min=-float(delta_clip), max=float(delta_clip))
+        u_next = u + delta
+        finite = torch.isfinite(u_next).flatten(1).all(dim=1)
+        finite_view = [u_next.shape[0]] + [1] * (u_next.dim() - 1)
+        u = torch.where(finite.view(*finite_view), u_next, states[-1])
+        states.append(u)
+    return torch.stack(states, dim=1)
+
+
+class FNOTrainer2D:
     def __init__(
         self,
         model: torch.nn.Module,
         dt: float,
         h_x: float,
         h_y: float,
-        lambda_recon: float = 1.0,
         lambda_spec: float = 0.0,
         spectral_s: float = 1.0,
+        channel_weights=None,
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         grad_clip: float = 1.0,
@@ -189,25 +149,20 @@ class LatentMarkovTrainer2D:
         device: str = "cpu",
         output_dir: Optional[str] = None,
         show_epoch_pbar: bool = True,
-        rollout_mode: str = "physical",
     ):
         self.model = model.to(device)
         self.dt = float(dt)
         self.h_x = float(h_x)
         self.h_y = float(h_y)
         self.area = self.h_x * self.h_y
-        self.lambda_recon = float(lambda_recon)
         self.lambda_spec = float(lambda_spec)
         self.spectral_s = float(spectral_s)
+        self.channel_weights = None if channel_weights is None else torch.as_tensor(channel_weights, dtype=torch.float32)
         self.grad_clip = float(grad_clip)
         self.rollout_delta_clip = None if rollout_delta_clip is None else float(rollout_delta_clip)
         self.device = device
         self.output_dir = output_dir
         self.show_epoch_pbar = bool(show_epoch_pbar)
-        self.rollout_mode = rollout_mode.strip().lower()
-        if self.rollout_mode not in {"physical", "latent"}:
-            raise ValueError("rollout_mode must be one of {physical, latent}")
-
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = torch.optim.lr_scheduler.StepLR(
             self.optimizer,
@@ -215,66 +170,51 @@ class LatentMarkovTrainer2D:
             gamma=float(lr_gamma),
         )
 
-    def _compute_losses(self, u_k: torch.Tensor, u_k1_data: torch.Tensor, f: torch.Tensor) -> Dict[str, torch.Tensor]:
-        pred = self.model.predict_step(u_k, f, dt=self.dt, return_latent=True)
-        if not (isinstance(pred, (tuple, list)) and len(pred) == 3):
-            raise ValueError("predict_step(..., return_latent=True) must return (u_next, z_k, z_next)")
-        u_pred, z_k, _ = pred
+    def _weights_for(self, tensor: torch.Tensor):
+        return _channel_weights(self.channel_weights, tensor)
 
-        loss_step = F.mse_loss(u_pred, u_k1_data)
+    def _compute_losses(self, u_k: torch.Tensor, u_k1: torch.Tensor, f: torch.Tensor) -> Dict[str, torch.Tensor]:
+        u_pred = self.model.predict_step(u_k, f, dt=self.dt)
+        weights = self._weights_for(u_pred)
+        loss_step = channel_weighted_mse(u_pred, u_k1, weights)
         loss_spec = (
-            spectral_sobolev_loss_2d(u_pred, u_k1_data, s=self.spectral_s)
+            spectral_sobolev_loss_2d(u_pred, u_k1, s=self.spectral_s)
             if self.lambda_spec > 0.0
             else loss_step.new_zeros(())
         )
-        loss_recon = F.mse_loss(self.model.decode(z_k), u_k)
-        loss_total = loss_step + self.lambda_spec * loss_spec + self.lambda_recon * loss_recon
-        return {
-            "loss": loss_total,
-            "loss_step": loss_step,
-            "loss_spec": loss_spec,
-            "loss_recon": loss_recon,
-        }
+        return {"loss": loss_step + self.lambda_spec * loss_spec, "loss_step": loss_step, "loss_spec": loss_spec}
 
     def train_epoch(self, loader: DataLoader, epoch: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
-        meters = {k: AverageMeter() for k in ("loss", "loss_step", "loss_spec", "loss_recon")}
-
-        show_pbar = self.show_epoch_pbar and (tqdm is not None)
+        meters = {k: AverageMeter() for k in ("loss", "loss_step", "loss_spec")}
         iterable = loader
         pbar = None
-        if show_pbar:
-            desc = f"Epoch {epoch:03d}" if epoch is not None else "Epoch"
-            pbar = tqdm(loader, total=len(loader), desc=desc, leave=False, dynamic_ncols=True)
+        if self.show_epoch_pbar and tqdm is not None:
+            pbar = tqdm(loader, total=len(loader), desc=f"Epoch {epoch:03d}" if epoch else "Epoch", leave=False)
             iterable = pbar
-
         for batch_idx, batch in enumerate(iterable, start=1):
             u_k, u_k1, f = _unpack_step_batch(batch)
             u_k = u_k.to(self.device)
             u_k1 = u_k1.to(self.device)
             f = f.to(self.device)
-
             losses = self._compute_losses(u_k, u_k1, f)
             self.optimizer.zero_grad()
             losses["loss"].backward()
-            if self.grad_clip > 0:
+            if self.grad_clip > 0.0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
-
             bsz = int(u_k.shape[0])
-            for k, meter in meters.items():
-                meter.update(losses[k].item(), bsz)
+            for key, meter in meters.items():
+                meter.update(losses[key].item(), bsz)
             if pbar is not None and (batch_idx == 1 or batch_idx % 10 == 0):
                 pbar.set_postfix(total=f"{meters['loss'].avg:.4f}", step=f"{meters['loss_step'].avg:.4f}")
-
         if pbar is not None:
             pbar.close()
         return {k: v.avg for k, v in meters.items()}
 
     def validate(self, step_loader: DataLoader, traj_loader: Optional[DataLoader] = None) -> Dict[str, float]:
         self.model.eval()
-        meters = {k: AverageMeter() for k in ("val_loss", "val_loss_step", "val_loss_spec", "val_loss_recon")}
-
+        meters = {k: AverageMeter() for k in ("val_loss", "val_loss_step", "val_loss_spec")}
         with torch.no_grad():
             for batch in step_loader:
                 u_k, u_k1, f = _unpack_step_batch(batch)
@@ -286,8 +226,6 @@ class LatentMarkovTrainer2D:
                 meters["val_loss"].update(losses["loss"].item(), bsz)
                 meters["val_loss_step"].update(losses["loss_step"].item(), bsz)
                 meters["val_loss_spec"].update(losses["loss_spec"].item(), bsz)
-                meters["val_loss_recon"].update(losses["loss_recon"].item(), bsz)
-
         metrics = {k: v.avg for k, v in meters.items()}
         if traj_loader is not None:
             rollout_meter = AverageMeter()
@@ -297,47 +235,36 @@ class LatentMarkovTrainer2D:
                     u0 = u0.to(self.device)
                     f = f.to(self.device)
                     u_ref = u_ref.to(self.device)
-                    n_steps = int(u_ref.shape[1] - 1)
-                    if self.rollout_mode == "latent":
-                        u_pred = rollout_latent_markov_latent_2d(
-                            self.model,
-                            u0=u0,
-                            f=f,
-                            n_steps=n_steps,
-                            dt=self.dt,
-                        )
-                    else:
-                        u_pred = rollout_latent_markov_2d(
-                            self.model,
-                            u0=u0,
-                            f=f,
-                            n_steps=n_steps,
-                            dt=self.dt,
-                            delta_clip=self.rollout_delta_clip,
-                        )
+                    u_pred = rollout_fno_2d(
+                        self.model,
+                        u0=u0,
+                        f=f,
+                        n_steps=int(u_ref.shape[1] - 1),
+                        dt=self.dt,
+                        delta_clip=self.rollout_delta_clip,
+                    )
                     rel = relative_l2_error_2d(u_pred, u_ref, area=self.area)
-                    rollout_meter.update(rel.mean(dim=-1).mean().item(), int(u0.shape[0]))
+                    rollout_meter.update(rel.mean().item(), int(u0.shape[0]))
             metrics["val_rollout_rel_l2"] = rollout_meter.avg
         return metrics
 
-    def _save_checkpoint(self, name: str, epoch: int, metrics: Dict[str, float]) -> None:
+    def _save_checkpoint(self, name: str, epoch: int, metrics: Dict[str, float], state_dict=None) -> None:
         if self.output_dir is None:
             return
         os.makedirs(self.output_dir, exist_ok=True)
         torch.save(
             {
                 "epoch": epoch,
-                "model_state_dict": self.model.state_dict(),
+                "model_state_dict": state_dict if state_dict is not None else self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "metrics": metrics,
                 "dt": self.dt,
                 "h_x": self.h_x,
                 "h_y": self.h_y,
-                "lambda_recon": self.lambda_recon,
                 "lambda_spec": self.lambda_spec,
                 "spectral_s": self.spectral_s,
                 "rollout_delta_clip": self.rollout_delta_clip,
-                "rollout_mode": self.rollout_mode,
+                "channel_weights": None if self.channel_weights is None else self.channel_weights.detach().cpu(),
             },
             os.path.join(self.output_dir, name),
         )
@@ -355,12 +282,11 @@ class LatentMarkovTrainer2D:
         best_metric = float("inf")
         best_epoch = 0
         best_metrics: Optional[Dict[str, float]] = None
-
-        for epoch in range(1, epochs + 1):
+        best_state_dict = None
+        for epoch in range(1, int(epochs) + 1):
             train_metrics = self.train_epoch(train_step_loader, epoch=epoch)
             history["train"].append({"epoch": epoch, **train_metrics})
-
-            if epoch % eval_interval == 0:
+            if epoch % int(eval_interval) == 0:
                 val_metrics = self.validate(val_step_loader, traj_loader=val_traj_loader)
                 history["val"].append({"epoch": epoch, **val_metrics})
                 monitor = val_metrics.get("val_rollout_rel_l2", val_metrics["val_loss_step"])
@@ -368,17 +294,16 @@ class LatentMarkovTrainer2D:
                     best_metric = monitor
                     best_epoch = epoch
                     best_metrics = val_metrics
+                    best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
                     self._save_checkpoint("best_model.pt", epoch, val_metrics)
                 print(
                     f"[Epoch {epoch:03d}] "
                     f"train_total={train_metrics['loss']:.6f} "
                     f"train_step={train_metrics['loss_step']:.6f} "
                     f"train_spec={train_metrics['loss_spec']:.6f} "
-                    f"train_recon={train_metrics['loss_recon']:.6f} "
                     f"val_total={val_metrics['val_loss']:.6f} "
                     f"val_step={val_metrics['val_loss_step']:.6f} "
                     f"val_spec={val_metrics['val_loss_spec']:.6f} "
-                    f"val_recon={val_metrics['val_loss_recon']:.6f} "
                     f"val_rollout={val_metrics.get('val_rollout_rel_l2', float('nan')):.6f}"
                 )
             else:
@@ -386,21 +311,31 @@ class LatentMarkovTrainer2D:
                     f"[Epoch {epoch:03d}] "
                     f"train_total={train_metrics['loss']:.6f} "
                     f"train_step={train_metrics['loss_step']:.6f} "
-                    f"train_spec={train_metrics['loss_spec']:.6f} "
-                    f"train_recon={train_metrics['loss_recon']:.6f}"
+                    f"train_spec={train_metrics['loss_spec']:.6f}"
                 )
-
-            if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
-                snapshot_metrics = best_metrics if best_metrics is not None else train_metrics
-                snapshot_epoch = best_epoch if best_metrics is not None else epoch
-                self._save_checkpoint(f"best_model_through_epoch_{epoch:04d}.pt", snapshot_epoch, snapshot_metrics)
-
+            if checkpoint_interval > 0 and epoch % int(checkpoint_interval) == 0:
+                self._save_checkpoint(
+                    f"best_model_through_epoch_{epoch:04d}.pt",
+                    best_epoch if best_metrics is not None else epoch,
+                    best_metrics if best_metrics is not None else train_metrics,
+                    state_dict=best_state_dict,
+                )
             self.scheduler.step()
 
         final_metrics = history["val"][-1] if history["val"] else history["train"][-1]
-        self._save_checkpoint("final_model.pt", epochs, final_metrics)
+        self._save_checkpoint("final_model.pt", int(epochs), final_metrics)
         if self.output_dir is not None:
             os.makedirs(self.output_dir, exist_ok=True)
             with open(os.path.join(self.output_dir, "history.json"), "w", encoding="utf-8") as f:
                 json.dump(history, f, indent=2)
         return history
+
+
+__all__ = [
+    "AverageMeter",
+    "FNOTrainer2D",
+    "channel_weighted_mse",
+    "relative_l2_error_2d",
+    "rollout_fno_2d",
+    "spectral_sobolev_loss_2d",
+]

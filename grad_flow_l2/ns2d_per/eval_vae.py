@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 
 try:
     from ..heat_data import load_dataset_splits
-    from ..navier_stokes2d_per_data import (
+    from .ns2d_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
@@ -32,7 +32,7 @@ try:
     )
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
-    from grad_flow_l2.navier_stokes2d_per_data import (
+    from grad_flow_l2.ns2d_per.ns2d_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rollout-mode",
         type=str,
-        default="physical",
+        default="latent",
         choices=["physical", "latent"],
         help="Rollout path: physical re-encodes each decoded state; latent encodes u0 once and advances in latent space.",
     )
@@ -169,7 +169,7 @@ def _evaluate_rollout_curves(
     area: float,
     delta_clip: float = 0.0,
     state_clip: float = 0.0,
-    rollout_mode: str = "physical",
+    rollout_mode: str = "latent",
 ) -> Dict[str, np.ndarray]:
     rel_batches = []
     rel_h1_batches = []

@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 try:
     from ..heat_data import load_dataset_splits
-    from ..navier_stokes2d_per_data import (
+    from .ns2d_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
@@ -32,7 +32,7 @@ try:
     from ..navier_stokes2d.trainer import HiddenGradientFlowTrainer2D
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
-    from grad_flow_l2.navier_stokes2d_per_data import (
+    from grad_flow_l2.ns2d_per.ns2d_data import (
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
