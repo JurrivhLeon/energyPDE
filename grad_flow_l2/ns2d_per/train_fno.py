@@ -75,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-dt-channel", action="store_true")
     parser.add_argument("--disable-forcing-channel", action="store_true")
     parser.add_argument("--no-residual", action="store_true", help="Predict u_{k+1} directly instead of an increment.")
+    parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Gaussian noise added after FNO lift during training only.")
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--eval-interval", type=int, default=1)
@@ -174,6 +175,7 @@ def _build_model(n_x: int, n_y: int, dt: float, state_channels: int, forcing_cha
         use_grid_features=not args.disable_fno_grid,
         default_dt=dt,
         residual=not args.no_residual,
+        lift_noise_std=args.lift_noise_std,
     )
 
 

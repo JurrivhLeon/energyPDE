@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-dt-channel", action="store_true")
     parser.add_argument("--disable-forcing-channel", action="store_true")
     parser.add_argument("--no-residual", action="store_true")
+    parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Fallback FNO lift-noise std when args.json is unavailable; inactive during eval.")
     return parser.parse_args()
 
 
@@ -145,6 +146,7 @@ def _build_model(n_x: int, n_y: int, dt: float, split: dict, args, train_args) -
         use_grid_features=not bool(getattr(train_args, "disable_fno_grid", args.disable_fno_grid)),
         default_dt=dt,
         residual=not bool(getattr(train_args, "no_residual", args.no_residual)),
+        lift_noise_std=float(getattr(train_args, "lift_noise_std", args.lift_noise_std)),
     )
 
 

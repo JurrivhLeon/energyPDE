@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-dt-channel", action="store_true")
     p.add_argument("--disable-forcing-channel", action="store_true")
     p.add_argument("--no-residual", action="store_true")
+    p.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Gaussian noise added after FNO lift during training only.")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--eval-interval", type=int, default=1)
     p.add_argument("--checkpoint-interval", type=int, default=25)
@@ -122,6 +123,7 @@ def _build_model(n_x: int, dt: float, args: argparse.Namespace) -> FNO1D:
         use_grid_features=not args.disable_fno_grid,
         default_dt=dt,
         residual=not args.no_residual,
+        lift_noise_std=args.lift_noise_std,
     )
 
 

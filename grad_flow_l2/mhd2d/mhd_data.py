@@ -52,7 +52,9 @@ STATE_NAMES = ("omega", "a")
 
 
 class MHD2DTrajectoryTensorDataset(Dataset):
-    def __init__(self, f_data: torch.Tensor, u0_data: torch.Tensor, u_traj_data: torch.Tensor):
+    def __init__(
+        self, f_data: torch.Tensor, u0_data: torch.Tensor, u_traj_data: torch.Tensor
+    ):
         if f_data.dim() != 3:
             raise ValueError("f_data must have shape (n_samples,n_x,n_y)")
         if u0_data.dim() != 4 or int(u0_data.shape[1]) != STATE_CHANNELS:
@@ -74,7 +76,11 @@ class MHD2DTrajectoryTensorDataset(Dataset):
         return int(self.u0_data.shape[0])
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        return {"f": self.f_data[idx], "u0": self.u0_data[idx], "u_traj": self.u_traj_data[idx]}
+        return {
+            "f": self.f_data[idx],
+            "u0": self.u0_data[idx],
+            "u_traj": self.u_traj_data[idx],
+        }
 
 
 class MHD2DStepDataset(Dataset):
@@ -105,11 +111,15 @@ def build_mhd2d_step_dataset(split_or_dataset) -> MHD2DStepDataset:
     raise TypeError("Expected split dict or MHD2DTrajectoryTensorDataset")
 
 
-def build_mhd2d_trajectory_dataset_from_split(split: Dict[str, torch.Tensor]) -> MHD2DTrajectoryTensorDataset:
+def build_mhd2d_trajectory_dataset_from_split(
+    split: Dict[str, torch.Tensor]
+) -> MHD2DTrajectoryTensorDataset:
     return MHD2DTrajectoryTensorDataset(split["f"], split["u0"], split["u_traj"])
 
 
-def _slice_split(data: Dict[str, torch.Tensor], start: int, end: int) -> Dict[str, torch.Tensor]:
+def _slice_split(
+    data: Dict[str, torch.Tensor], start: int, end: int
+) -> Dict[str, torch.Tensor]:
     return {key: value[start:end].clone() for key, value in data.items()}
 
 
@@ -175,16 +185,14 @@ def sample_mhd2d_initial_conditions(
         dtype=dtype,
     )
     b_x, b_y, _ = magnetic_potential_to_field_and_current(a, cache)
-    b_rms = (b_x.square() + b_y.square()).mean(dim=(-2, -1), keepdim=True).sqrt().clamp_min(1e-8)
+    b_rms = (
+        (b_x.square() + b_y.square())
+        .mean(dim=(-2, -1), keepdim=True)
+        .sqrt()
+        .clamp_min(1e-8)
+    )
     a = project_zero_mean_2d(float(magnetic_field_rms) * a / b_rms)
     return torch.stack([omega, a], dim=1)
-
-
-def _cap_linf(field: torch.Tensor, max_abs: float) -> torch.Tensor:
-    if max_abs <= 0.0:
-        return field
-    scale = torch.clamp(float(max_abs) / field.abs().amax(dim=(-2, -1), keepdim=True).clamp_min(1e-8), max=1.0)
-    return field * scale
 
 
 def generate_mhd2d_dataset_splits(
@@ -208,20 +216,19 @@ def generate_mhd2d_dataset_splits(
     ic_mode: str = "potential_a",
     time_integrator: str = "rk4",
     dealias_factor: float = 1.5,
-    omega_spectrum_scale: float = 8.0 ** 1.5,
+    omega_spectrum_scale: float = 8.0**1.5,
     omega_spectrum_shift: float = 4.0,
     omega_spectrum_power: float = 2.5,
-    a_spectrum_scale: float = 8.0 ** 1.5,
+    a_spectrum_scale: float = 8.0**1.5,
     a_spectrum_shift: float = 4.0,
     a_spectrum_power: float = 2.5,
     forcing_mode: str = "vorticity",
-    f_grf_amplitude: float = 0.25,
-    f_sinusoidal_amplitude: float = 0.50,
+    f_grf_linf_min: float = 0.05,
+    f_grf_linf_max: float = 0.20,
     f_sinusoidal_linf_min: float = 0.10,
     f_sinusoidal_linf_max: float = 0.20,
     f_sinusoidal_terms_min: int = 2,
     f_sinusoidal_terms_max: int = 6,
-    f_max_abs: float = 0.25,
     f_grf_prob: float = 0.80,
     f_matern_prob: float = 0.0,
     f_length_scale_min: float = 0.05,
@@ -248,7 +255,9 @@ def generate_mhd2d_dataset_splits(
     if ic_mode not in {"omega_a", "potential_a"}:
         raise ValueError("ic_mode must be one of {'omega_a', 'potential_a'}")
     if time_integrator not in {"rk4", "cn", "crank_nicolson"}:
-        raise ValueError("time_integrator must be one of {'rk4', 'cn', 'crank_nicolson'}")
+        raise ValueError(
+            "time_integrator must be one of {'rk4', 'cn', 'crank_nicolson'}"
+        )
     if dealias_factor < 1.0:
         raise ValueError("dealias_factor must be >= 1")
 
@@ -292,8 +301,7 @@ def generate_mhd2d_dataset_splits(
             n_x=solver_n_x,
             n_y=solver_n_y,
             n_samples=total,
-            grf_amplitude=f_grf_amplitude,
-            sinusoidal_amplitude=f_sinusoidal_amplitude,
+            grf_linf_range=(f_grf_linf_min, f_grf_linf_max),
             sinusoidal_linf_range=(f_sinusoidal_linf_min, f_sinusoidal_linf_max),
             sinusoidal_terms_range=(f_sinusoidal_terms_min, f_sinusoidal_terms_max),
             length_scale_range=(f_length_scale_min, f_length_scale_max),
@@ -305,8 +313,10 @@ def generate_mhd2d_dataset_splits(
             progress_desc="sample forcing",
             device=device,
         ).to(dtype=torch.float64)
-        f_hr = _cap_linf(project_zero_mean_2d(f_hr), max_abs=f_max_abs)
-        f = spectral_truncate_periodic_field_2d(f_hr, target_n_x=n_x, target_n_y=n_y).to(dtype=dtype)
+        f_hr = project_zero_mean_2d(f_hr)
+        f = spectral_truncate_periodic_field_2d(
+            f_hr, target_n_x=n_x, target_n_y=n_y
+        ).to(dtype=dtype)
         f = project_zero_mean_2d(f)
 
     try:
@@ -319,8 +329,15 @@ def generate_mhd2d_dataset_splits(
     chunk_bar = None
     record_bar = None
     if show_progress and tqdm is not None:
-        chunk_bar = tqdm(total=total_chunks, desc="trajectory chunks", leave=True, dynamic_ncols=True)
-        record_bar = tqdm(total=total_record_intervals, desc="record intervals", leave=True, dynamic_ncols=True)
+        chunk_bar = tqdm(
+            total=total_chunks, desc="trajectory chunks", leave=True, dynamic_ncols=True
+        )
+        record_bar = tqdm(
+            total=total_record_intervals,
+            desc="record intervals",
+            leave=True,
+            dynamic_ncols=True,
+        )
 
     traj_chunks = []
     for start in starts:
@@ -333,7 +350,11 @@ def generate_mhd2d_dataset_splits(
             record_dt=record_dt,
             nu=nu,
             eta=eta,
-            progress_callback=(None if record_bar is None else lambda n, b=end-start: record_bar.update(int(n) * int(b))),
+            progress_callback=(
+                None
+                if record_bar is None
+                else lambda n, b=end - start: record_bar.update(int(n) * int(b))
+            ),
             time_integrator=time_integrator,
             dealias_factor=dealias_factor,
         )
@@ -343,7 +364,9 @@ def generate_mhd2d_dataset_splits(
             target_n_x=n_x,
             target_n_y=n_y,
         ).reshape(B, T, C, n_x, n_y)
-        traj_chunks.append(traj_small[:, warmup_records : warmup_records + n_steps + 1].to(dtype=dtype))
+        traj_chunks.append(
+            traj_small[:, warmup_records : warmup_records + n_steps + 1].to(dtype=dtype)
+        )
         if chunk_bar is not None:
             chunk_bar.update(1)
     if chunk_bar is not None:
@@ -391,7 +414,18 @@ def generate_mhd2d_dataset_splits(
             "a_spectrum_scale": float(a_spectrum_scale),
             "a_spectrum_shift": float(a_spectrum_shift),
             "a_spectrum_power": float(a_spectrum_power),
-            "f_max_abs": float(f_max_abs),
+            "f_grf_linf_min": float(f_grf_linf_min),
+            "f_grf_linf_max": float(f_grf_linf_max),
+            "f_sinusoidal_linf_min": float(f_sinusoidal_linf_min),
+            "f_sinusoidal_linf_max": float(f_sinusoidal_linf_max),
+            "f_sinusoidal_terms_min": int(f_sinusoidal_terms_min),
+            "f_sinusoidal_terms_max": int(f_sinusoidal_terms_max),
+            "f_grf_prob": float(f_grf_prob),
+            "f_matern_prob": float(f_matern_prob),
+            "f_length_scale_min": float(f_length_scale_min),
+            "f_length_scale_max": float(f_length_scale_max),
+            "f_max_modes": int(f_max_modes),
+            "f_allow_sinusoidal": bool(f_allow_sinusoidal),
             "n_train": int(n_train),
             "n_val": int(n_val),
             "n_test": int(n_test),
@@ -406,7 +440,9 @@ def generate_mhd2d_dataset_splits(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Generate periodic 2D incompressible resistive MHD dataset splits")
+    p = argparse.ArgumentParser(
+        description="Generate periodic 2D incompressible resistive MHD dataset splits"
+    )
     p.add_argument("--n-x", type=int, default=128)
     p.add_argument("--n-y", type=int, default=128)
     p.add_argument("--solver-n-x", type=int, default=128)
@@ -420,29 +456,34 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eta", type=float, default=1e-3)
     p.add_argument("--omega-rms", type=float, default=0.5)
     p.add_argument("--magnetic-field-rms", type=float, default=0.1)
-    p.add_argument("--ic-mode", choices=["omega_a", "potential_a"], default="potential_a")
-    p.add_argument("--time-integrator", choices=["rk4", "cn", "crank_nicolson"], default="rk4")
+    p.add_argument(
+        "--ic-mode", choices=["omega_a", "potential_a"], default="potential_a"
+    )
+    p.add_argument(
+        "--time-integrator", choices=["rk4", "cn", "crank_nicolson"], default="rk4"
+    )
     p.add_argument("--dealias-factor", type=float, default=1.5)
-    p.add_argument("--omega-spectrum-scale", type=float, default=8.0 ** 1.5)
+    p.add_argument("--omega-spectrum-scale", type=float, default=8.0**1.5)
     p.add_argument("--omega-spectrum-shift", type=float, default=4.0)
     p.add_argument("--omega-spectrum-power", type=float, default=2.5)
-    p.add_argument("--a-spectrum-scale", type=float, default=8.0 ** 1.5)
+    p.add_argument("--a-spectrum-scale", type=float, default=8.0**1.5)
     p.add_argument("--a-spectrum-shift", type=float, default=4.0)
     p.add_argument("--a-spectrum-power", type=float, default=2.5)
     p.add_argument("--forcing-mode", choices=["zero", "vorticity"], default="vorticity")
-    p.add_argument("--f-grf-amplitude", type=float, default=0.25)
-    p.add_argument("--f-sinusoidal-amplitude", type=float, default=0.50)
+    p.add_argument("--f-grf-linf-min", type=float, default=0.05)
+    p.add_argument("--f-grf-linf-max", type=float, default=0.20)
     p.add_argument("--f-sinusoidal-linf-min", type=float, default=0.10)
     p.add_argument("--f-sinusoidal-linf-max", type=float, default=0.20)
     p.add_argument("--f-sinusoidal-terms-min", type=int, default=2)
     p.add_argument("--f-sinusoidal-terms-max", type=int, default=6)
-    p.add_argument("--f-max-abs", type=float, default=0.25)
     p.add_argument("--f-grf-prob", type=float, default=0.80)
     p.add_argument("--f-matern-prob", type=float, default=0.0)
     p.add_argument("--f-length-scale-min", type=float, default=0.05)
     p.add_argument("--f-length-scale-max", type=float, default=0.15)
     p.add_argument("--f-max-modes", type=int, default=3)
-    p.add_argument("--f-allow-sinusoidal", dest="f_allow_sinusoidal", action="store_true")
+    p.add_argument(
+        "--f-allow-sinusoidal", dest="f_allow_sinusoidal", action="store_true"
+    )
     p.add_argument("--f-no-sinusoidal", dest="f_allow_sinusoidal", action="store_false")
     p.set_defaults(f_allow_sinusoidal=True)
     p.add_argument("--n-train", type=int, default=1600)
@@ -452,7 +493,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--chunk-size", type=int, default=64)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--no-progress", action="store_true")
-    p.add_argument("--dataset-path", type=str, default="grad_flow_l2/mhd2d/datasets/mhd2d_train2000_t1_rk4_dt1e-3_outdt1e-2.pt")
+    p.add_argument(
+        "--dataset-path",
+        type=str,
+        default="grad_flow_l2/mhd2d/datasets/mhd2d_train2000_t1_rk4_dt1e-3_outdt1e-2.pt",
+    )
     p.add_argument("--settings-path", type=str, default=None)
     return p.parse_args()
 
@@ -486,13 +531,12 @@ def main(args: argparse.Namespace) -> None:
         a_spectrum_shift=args.a_spectrum_shift,
         a_spectrum_power=args.a_spectrum_power,
         forcing_mode=args.forcing_mode,
-        f_grf_amplitude=args.f_grf_amplitude,
-        f_sinusoidal_amplitude=args.f_sinusoidal_amplitude,
+        f_grf_linf_min=args.f_grf_linf_min,
+        f_grf_linf_max=args.f_grf_linf_max,
         f_sinusoidal_linf_min=args.f_sinusoidal_linf_min,
         f_sinusoidal_linf_max=args.f_sinusoidal_linf_max,
         f_sinusoidal_terms_min=args.f_sinusoidal_terms_min,
         f_sinusoidal_terms_max=args.f_sinusoidal_terms_max,
-        f_max_abs=args.f_max_abs,
         f_grf_prob=args.f_grf_prob,
         f_matern_prob=args.f_matern_prob,
         f_length_scale_min=args.f_length_scale_min,
@@ -513,10 +557,14 @@ def main(args: argparse.Namespace) -> None:
         if settings_dir:
             os.makedirs(settings_dir, exist_ok=True)
         with open(args.settings_path, "w", encoding="utf-8") as f:
-            json.dump({"cli_args": vars(args), "meta": splits["meta"]}, f, indent=2, sort_keys=True)
+            json.dump(
+                {"cli_args": vars(args), "meta": splits["meta"]},
+                f,
+                indent=2,
+                sort_keys=True,
+            )
             f.write("\n")
 
 
 if __name__ == "__main__":
     main(parse_args())
-

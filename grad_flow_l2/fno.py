@@ -190,6 +190,7 @@ class FNO2D(nn.Module):
         use_grid_features: bool = True,
         default_dt: Optional[float] = None,
         residual: bool = True,
+        lift_noise_std: float = 0.0,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -201,6 +202,9 @@ class FNO2D(nn.Module):
         self.use_grid_features = bool(use_grid_features)
         self.default_dt = default_dt
         self.residual = bool(residual)
+        self.lift_noise_std = float(lift_noise_std)
+        if self.lift_noise_std < 0.0:
+            raise ValueError("lift_noise_std must be >= 0")
         if self.state_channels < 1:
             raise ValueError("state_channels must be >= 1")
         if self.forcing_channels < 1:
@@ -274,6 +278,8 @@ class FNO2D(nn.Module):
             feat.append(self._grid_features(u.shape[0], u.device, u.dtype))
 
         h = self.lift(torch.cat(feat, dim=1))
+        if self.training and self.lift_noise_std > 0.0:
+            h = h + self.lift_noise_std * torch.randn_like(h)
         for block in self.blocks:
             h = block(h)
         out = self.project(h)
@@ -425,6 +431,7 @@ class FNO1D(nn.Module):
         use_grid_features: bool = True,
         default_dt: Optional[float] = None,
         residual: bool = True,
+        lift_noise_std: float = 0.0,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -435,6 +442,9 @@ class FNO1D(nn.Module):
         self.use_grid_features = bool(use_grid_features)
         self.default_dt = default_dt
         self.residual = bool(residual)
+        self.lift_noise_std = float(lift_noise_std)
+        if self.lift_noise_std < 0.0:
+            raise ValueError("lift_noise_std must be >= 0")
         if self.state_channels < 1:
             raise ValueError("state_channels must be >= 1")
         if self.forcing_channels < 1:
@@ -501,6 +511,8 @@ class FNO1D(nn.Module):
         if self.use_grid_features:
             feat.append(self._grid_features(u.shape[0], u.device, u.dtype))
         h = self.lift(torch.cat(feat, dim=1))
+        if self.training and self.lift_noise_std > 0.0:
+            h = h + self.lift_noise_std * torch.randn_like(h)
         for block in self.blocks:
             h = block(h)
         out = self.project(h)
