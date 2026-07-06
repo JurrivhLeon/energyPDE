@@ -57,7 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-dt-channel", action="store_true")
     parser.add_argument("--disable-forcing-channel", action="store_true")
     parser.add_argument("--no-residual", action="store_true")
-    parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Gaussian noise added after FNO lift during training only.")
+    parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Matern-filtered Gaussian noise added after FNO lift during training only.")
+    parser.add_argument("--lift-noise-corr-length", type=float, default=1.0, help="Correlation length for Matern-filtered FNO lift noise.")
+    parser.add_argument("--lift-noise-decay-s", type=float, default=2.0, help="Spectral decay exponent s for Matern-filtered FNO lift noise.")
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--eval-interval", type=int, default=1)
@@ -116,6 +118,8 @@ def _build_model(n_x: int, n_y: int, dt: float, args: argparse.Namespace) -> FNO
         default_dt=dt,
         residual=not args.no_residual,
         lift_noise_std=args.lift_noise_std,
+        lift_noise_corr_length=args.lift_noise_corr_length,
+        lift_noise_decay_s=args.lift_noise_decay_s,
     )
 
 
@@ -304,7 +308,7 @@ def main(args: argparse.Namespace) -> None:
         if args.n_test > 0:
             print("Dry run test metrics:", trainer.validate(test_step_loader, test_traj_loader))
         return
-    print(f"Training config: epochs={args.epochs}, lr={args.lr}, width={args.width}, fno_layers={args.fno_layers}, fno_modes=({args.fno_modes_x},{args.fno_modes_y}), residual={not args.no_residual}, train_time=[{t_window_start:.6f},{t_window_end:.6f}], output={run_dir}")
+    print(f"Training config: epochs={args.epochs}, lr={args.lr}, width={args.width}, fno_layers={args.fno_layers}, fno_modes=({args.fno_modes_x},{args.fno_modes_y}), residual={not args.no_residual}, lift_noise_std={args.lift_noise_std}, lift_noise_corr_length={args.lift_noise_corr_length}, lift_noise_decay_s={args.lift_noise_decay_s}, train_time=[{t_window_start:.6f},{t_window_end:.6f}], output={run_dir}")
     history = trainer.fit(train_step_loader, val_step_loader, val_traj_loader, args.epochs, args.eval_interval, args.checkpoint_interval)
     print("Training complete.")
     print("Last train metrics:", history["train"][-1])

@@ -75,7 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-dt-channel", action="store_true")
     parser.add_argument("--disable-forcing-channel", action="store_true")
     parser.add_argument("--no-residual", action="store_true", help="Predict u_{k+1} directly instead of an increment.")
-    parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Gaussian noise added after FNO lift during training only.")
+    parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Matern-filtered Gaussian noise added after FNO lift during training only.")
+    parser.add_argument("--lift-noise-corr-length", type=float, default=1.0, help="Correlation length for Matern-filtered FNO lift noise.")
+    parser.add_argument("--lift-noise-decay-s", type=float, default=2.0, help="Spectral decay exponent s for Matern-filtered FNO lift noise.")
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--eval-interval", type=int, default=1)
@@ -176,6 +178,8 @@ def _build_model(n_x: int, n_y: int, dt: float, state_channels: int, forcing_cha
         default_dt=dt,
         residual=not args.no_residual,
         lift_noise_std=args.lift_noise_std,
+        lift_noise_corr_length=args.lift_noise_corr_length,
+        lift_noise_decay_s=args.lift_noise_decay_s,
     )
 
 
@@ -331,6 +335,8 @@ def main(args: argparse.Namespace) -> None:
         f"Training config: epochs={args.epochs}, lr={args.lr}, lambda_spec={args.lambda_spec}, "
         f"fno_layers={args.fno_layers}, width={args.width}, modes=({args.fno_modes_x},{args.fno_modes_y}), "
         f"residual={not args.no_residual}, rollout_delta_clip={rollout_delta_clip}, "
+        f"lift_noise_std={args.lift_noise_std}, lift_noise_corr_length={args.lift_noise_corr_length}, "
+        f"lift_noise_decay_s={args.lift_noise_decay_s}, "
         f"train_time=[{t_window_start:.6f},{t_window_end:.6f}], output={run_dir}"
     )
     history = trainer.fit(

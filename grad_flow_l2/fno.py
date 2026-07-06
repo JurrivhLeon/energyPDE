@@ -191,6 +191,8 @@ class FNO2D(nn.Module):
         default_dt: Optional[float] = None,
         residual: bool = True,
         lift_noise_std: float = 0.0,
+        lift_noise_corr_length: float = 1.0,
+        lift_noise_decay_s: float = 2.0,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -203,8 +205,14 @@ class FNO2D(nn.Module):
         self.default_dt = default_dt
         self.residual = bool(residual)
         self.lift_noise_std = float(lift_noise_std)
+        self.lift_noise_corr_length = float(lift_noise_corr_length)
+        self.lift_noise_decay_s = float(lift_noise_decay_s)
         if self.lift_noise_std < 0.0:
             raise ValueError("lift_noise_std must be >= 0")
+        if self.lift_noise_corr_length <= 0.0:
+            raise ValueError("lift_noise_corr_length must be > 0")
+        if self.lift_noise_decay_s <= 0.0:
+            raise ValueError("lift_noise_decay_s must be > 0")
         if self.state_channels < 1:
             raise ValueError("state_channels must be >= 1")
         if self.forcing_channels < 1:
@@ -255,6 +263,20 @@ class FNO2D(nn.Module):
         grid = _periodic_grid_2d(self.n_x, self.n_y, device=device, dtype=dtype)
         return grid.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
+    def _lift_noise_filter(self, device, dtype) -> torch.Tensor:
+        kx = 2.0 * torch.pi * torch.fft.fftfreq(self.n_x, d=1.0 / float(self.n_x), device=device).to(dtype=dtype)
+        ky = 2.0 * torch.pi * torch.fft.rfftfreq(self.n_y, d=1.0 / float(self.n_y), device=device).to(dtype=dtype)
+        kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
+        radius_sq = kx_grid.square() + ky_grid.square()
+        return (1.0 + (self.lift_noise_corr_length ** 2) * radius_sq).pow(-0.5 * self.lift_noise_decay_s)
+
+    def _sample_lift_noise(self, h: torch.Tensor) -> torch.Tensor:
+        xi = torch.randn_like(h)
+        xi_hat = torch.fft.rfft2(xi, dim=(-2, -1), norm="ortho")
+        filt = self._lift_noise_filter(device=h.device, dtype=h.dtype).unsqueeze(0).unsqueeze(0)
+        return torch.fft.irfft2(xi_hat * filt, s=(self.n_x, self.n_y), dim=(-2, -1), norm="ortho")
+
+
     def _restore_state_shape(self, u: torch.Tensor, squeeze: bool) -> torch.Tensor:
         if self.state_channels == 1:
             u = u.squeeze(1)
@@ -279,7 +301,7 @@ class FNO2D(nn.Module):
 
         h = self.lift(torch.cat(feat, dim=1))
         if self.training and self.lift_noise_std > 0.0:
-            h = h + self.lift_noise_std * torch.randn_like(h)
+            h = h + self.lift_noise_std * self._sample_lift_noise(h)
         for block in self.blocks:
             h = block(h)
         out = self.project(h)
@@ -432,6 +454,8 @@ class FNO1D(nn.Module):
         default_dt: Optional[float] = None,
         residual: bool = True,
         lift_noise_std: float = 0.0,
+        lift_noise_corr_length: float = 1.0,
+        lift_noise_decay_s: float = 2.0,
     ):
         super().__init__()
         self.n_x = int(n_x)
@@ -443,8 +467,14 @@ class FNO1D(nn.Module):
         self.default_dt = default_dt
         self.residual = bool(residual)
         self.lift_noise_std = float(lift_noise_std)
+        self.lift_noise_corr_length = float(lift_noise_corr_length)
+        self.lift_noise_decay_s = float(lift_noise_decay_s)
         if self.lift_noise_std < 0.0:
             raise ValueError("lift_noise_std must be >= 0")
+        if self.lift_noise_corr_length <= 0.0:
+            raise ValueError("lift_noise_corr_length must be > 0")
+        if self.lift_noise_decay_s <= 0.0:
+            raise ValueError("lift_noise_decay_s must be > 0")
         if self.state_channels < 1:
             raise ValueError("state_channels must be >= 1")
         if self.forcing_channels < 1:
@@ -489,6 +519,16 @@ class FNO1D(nn.Module):
     def _grid_features(self, batch_size: int, device, dtype) -> torch.Tensor:
         return _periodic_grid_1d(self.n_x, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
 
+    def _lift_noise_filter(self, device, dtype) -> torch.Tensor:
+        k = 2.0 * torch.pi * torch.fft.rfftfreq(self.n_x, d=1.0 / float(self.n_x), device=device).to(dtype=dtype)
+        return (1.0 + (self.lift_noise_corr_length ** 2) * k.square()).pow(-0.5 * self.lift_noise_decay_s)
+
+    def _sample_lift_noise(self, h: torch.Tensor) -> torch.Tensor:
+        xi = torch.randn_like(h)
+        xi_hat = torch.fft.rfft(xi, dim=-1, norm="ortho")
+        filt = self._lift_noise_filter(device=h.device, dtype=h.dtype).view(1, 1, -1)
+        return torch.fft.irfft(xi_hat * filt, n=self.n_x, dim=-1, norm="ortho")
+
     def _restore_state_shape(self, u: torch.Tensor, squeeze: bool) -> torch.Tensor:
         if self.state_channels == 1:
             u = u.squeeze(1)
@@ -512,7 +552,7 @@ class FNO1D(nn.Module):
             feat.append(self._grid_features(u.shape[0], u.device, u.dtype))
         h = self.lift(torch.cat(feat, dim=1))
         if self.training and self.lift_noise_std > 0.0:
-            h = h + self.lift_noise_std * torch.randn_like(h)
+            h = h + self.lift_noise_std * self._sample_lift_noise(h)
         for block in self.blocks:
             h = block(h)
         out = self.project(h)

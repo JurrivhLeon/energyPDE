@@ -67,7 +67,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-dt-channel", action="store_true")
     p.add_argument("--disable-forcing-channel", action="store_true")
     p.add_argument("--no-residual", action="store_true")
-    p.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Gaussian noise added after FNO lift during training only.")
+    p.add_argument("--lift-noise-std", type=float, default=0.0, help="Std of Matern-filtered Gaussian noise added after FNO lift during training only.")
+    p.add_argument("--lift-noise-corr-length", type=float, default=1.0, help="Correlation length for Matern-filtered FNO lift noise.")
+    p.add_argument("--lift-noise-decay-s", type=float, default=2.0, help="Spectral decay exponent s for Matern-filtered FNO lift noise.")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--eval-interval", type=int, default=1)
     p.add_argument("--checkpoint-interval", type=int, default=25)
@@ -124,6 +126,8 @@ def _build_model(n_x: int, dt: float, args: argparse.Namespace) -> FNO1D:
         default_dt=dt,
         residual=not args.no_residual,
         lift_noise_std=args.lift_noise_std,
+        lift_noise_corr_length=args.lift_noise_corr_length,
+        lift_noise_decay_s=args.lift_noise_decay_s,
     )
 
 
@@ -309,7 +313,7 @@ def main(args):
     if args.dry_run:
         print("Dry run val metrics:", trainer.validate(loaders["val_step"], loaders["val_traj"]))
         return
-    print(f"Training config: epochs={args.epochs}, lr={args.lr}, width={args.width}, fno_layers={args.fno_layers}, fno_modes={args.fno_modes}, residual={not args.no_residual}, train_time=[{t_window_start:.6f},{t_window_end:.6f}], output={run_dir}")
+    print(f"Training config: epochs={args.epochs}, lr={args.lr}, width={args.width}, fno_layers={args.fno_layers}, fno_modes={args.fno_modes}, residual={not args.no_residual}, lift_noise_std={args.lift_noise_std}, lift_noise_corr_length={args.lift_noise_corr_length}, lift_noise_decay_s={args.lift_noise_decay_s}, train_time=[{t_window_start:.6f},{t_window_end:.6f}], output={run_dir}")
     history = trainer.fit(loaders["train_step"], loaders["val_step"], loaders["val_traj"], args.epochs, args.eval_interval, args.checkpoint_interval)
     print("Training complete.")
     print("Last train metrics:", history["train"][-1])

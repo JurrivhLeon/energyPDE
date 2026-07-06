@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-forcing-channel", action="store_true")
     p.add_argument("--no-residual", action="store_true")
     p.add_argument("--lift-noise-std", type=float, default=0.0, help="Fallback FNO lift-noise std when args.json is unavailable; inactive during eval.")
+    p.add_argument("--lift-noise-corr-length", type=float, default=1.0, help="Fallback Matern correlation length for FNO lift noise.")
+    p.add_argument("--lift-noise-decay-s", type=float, default=2.0, help="Fallback spectral decay exponent s for FNO lift noise.")
     return p.parse_args()
 
 
@@ -96,6 +98,8 @@ def _build_model(n_x: int, dt: float, args, train_args) -> FNO1D:
         default_dt=dt,
         residual=not bool(getattr(train_args, "no_residual", args.no_residual)),
         lift_noise_std=float(getattr(train_args, "lift_noise_std", args.lift_noise_std)),
+        lift_noise_corr_length=float(getattr(train_args, "lift_noise_corr_length", args.lift_noise_corr_length)),
+        lift_noise_decay_s=float(getattr(train_args, "lift_noise_decay_s", args.lift_noise_decay_s)),
     )
 
 
