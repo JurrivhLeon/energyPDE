@@ -20,12 +20,16 @@ from typing import Dict, Optional
 import torch
 
 
-def _ensure_batch_2d(x: torch.Tensor, name: str = "tensor") -> tuple[torch.Tensor, bool]:
+def _ensure_batch_2d(
+    x: torch.Tensor, name: str = "tensor"
+) -> tuple[torch.Tensor, bool]:
     if x.dim() == 2:
         return x.unsqueeze(0), True
     if x.dim() == 3:
         return x, False
-    raise ValueError(f"{name} must have shape (n_x,n_y) or (batch,n_x,n_y), got {tuple(x.shape)}")
+    raise ValueError(
+        f"{name} must have shape (n_x,n_y) or (batch,n_x,n_y), got {tuple(x.shape)}"
+    )
 
 
 def _match_batch_2d(x: torch.Tensor, batch_size: int, name: str) -> torch.Tensor:
@@ -56,7 +60,9 @@ def to_periodic_field_2d(field: torch.Tensor, n_x: int, n_y: int) -> torch.Tenso
             return field.unsqueeze(0)
         if field.shape == (n_x + 2, n_y + 2):
             return field[1:-1, 1:-1].unsqueeze(0)
-        raise ValueError(f"2D field shape must be ({n_x},{n_y}) or ({n_x+2},{n_y+2}), got {tuple(field.shape)}")
+        raise ValueError(
+            f"2D field shape must be ({n_x},{n_y}) or ({n_x+2},{n_y+2}), got {tuple(field.shape)}"
+        )
     if field.dim() == 3:
         if field.shape[1:] == (n_x, n_y):
             return field
@@ -103,7 +109,9 @@ def spectral_truncate_periodic_field_2d(
     field_hat = torch.fft.fftshift(_fft2(field_b), dim=(-2, -1))
     start_x = (n_x - target_n_x) // 2
     start_y = (n_y - target_n_y) // 2
-    field_hat_small = field_hat[:, start_x : start_x + target_n_x, start_y : start_y + target_n_y]
+    field_hat_small = field_hat[
+        :, start_x : start_x + target_n_x, start_y : start_y + target_n_y
+    ]
     scale = (float(target_n_x) * float(target_n_y)) / (float(n_x) * float(n_y))
     field_small = torch.fft.ifft2(
         torch.fft.ifftshift(field_hat_small * scale, dim=(-2, -1)),
@@ -118,7 +126,7 @@ def sample_periodic_gaussian_field_2d(
     n_x: int,
     n_y: int,
     n_samples: int = 1,
-    spectrum_scale: float = 5.0 ** 1.5,
+    spectrum_scale: float = 5.0**1.5,
     spectrum_shift: float = 25.0,
     spectrum_power: float = 2.5,
     zero_mean: bool = True,
@@ -141,15 +149,66 @@ def sample_periodic_gaussian_field_2d(
     k_x = torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=device, dtype=dtype)
     k_y = torch.fft.rfftfreq(n_y, d=1.0 / float(n_y), device=device, dtype=dtype)
     k2 = k_x.unsqueeze(1) ** 2 + k_y.unsqueeze(0) ** 2
-    power = float(spectrum_scale) * torch.pow(k2 + float(spectrum_shift), -float(spectrum_power))
+    power = float(spectrum_scale) * torch.pow(
+        k2 + float(spectrum_shift), -float(spectrum_power)
+    )
 
     real = torch.randn(n_samples, n_x, n_y // 2 + 1, device=device, dtype=dtype)
     imag = torch.randn(n_samples, n_x, n_y // 2 + 1, device=device, dtype=dtype)
-    noise = torch.complex(real, imag) / (2.0 ** 0.5)
+    noise = torch.complex(real, imag) / (2.0**0.5)
     spectrum = noise * torch.sqrt(power).unsqueeze(0)
     if zero_mean:
         spectrum[:, 0, 0] = 0.0
     samples = torch.fft.irfft2(spectrum, s=(n_x, n_y)) * ((n_x * n_y) ** 0.5)
+    samples = project_zero_mean_2d(samples) if zero_mean else samples
+    return samples
+
+
+def sample_periodic_gaussian_field_2d_fno(
+    n_x: int,
+    n_y: int,
+    n_samples: int = 1,
+    spectrum_scale: float = 7.0**1.5,
+    spectrum_shift: float = 49.0,
+    spectrum_power: float = 2.5,
+    zero_mean: bool = True,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """
+    Sample a periodic Gaussian random field using the FNO Navier-Stokes
+    data-generation convention.
+
+    The Fourier amplitudes follow the common FNO GaussianRF implementation:
+
+        sqrt_eig_k = n_x * n_y * sqrt(2) * spectrum_scale
+                     * (4*pi^2*|k|^2 + spectrum_shift)^(-spectrum_power/2).
+
+    For the original FNO Navier-Stokes setting, use
+    spectrum_scale=7^(3/2), spectrum_shift=49, spectrum_power=2.5.
+    """
+    if n_x < 1 or n_y < 1:
+        raise ValueError("n_x and n_y must be >= 1")
+    if spectrum_scale <= 0 or spectrum_shift <= 0 or spectrum_power <= 0:
+        raise ValueError("spectrum parameters must be > 0")
+
+    k_x = torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=device, dtype=dtype)
+    k_y = torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=device, dtype=dtype)
+    k2 = k_x.unsqueeze(1) ** 2 + k_y.unsqueeze(0) ** 2
+    eig = 4.0 * torch.pi * torch.pi * k2 + float(spectrum_shift)
+    sqrt_eig = (
+        float(n_x * n_y)
+        * (2.0**0.5)
+        * float(spectrum_scale)
+        * torch.pow(eig, -0.5 * float(spectrum_power))
+    )
+    if zero_mean:
+        sqrt_eig[0, 0] = 0.0
+
+    real = torch.randn(n_samples, n_x, n_y, device=device, dtype=dtype)
+    imag = torch.randn(n_samples, n_x, n_y, device=device, dtype=dtype)
+    coeff = torch.complex(real * sqrt_eig.unsqueeze(0), imag * sqrt_eig.unsqueeze(0))
+    samples = torch.fft.ifft2(coeff, s=(n_x, n_y)).real
     samples = project_zero_mean_2d(samples) if zero_mean else samples
     return samples
 
@@ -170,19 +229,38 @@ def prepare_ns2d_periodic_spectral_cache(
     if h_x <= 0 or h_y <= 0:
         raise ValueError("h_x and h_y must be > 0")
 
-    k_x = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=device).to(dtype=dtype)
-    k_y = 2.0 * torch.pi * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=device).to(dtype=dtype)
+    k_x = (
+        2.0
+        * torch.pi
+        * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=device).to(dtype=dtype)
+    )
+    k_y = (
+        2.0
+        * torch.pi
+        * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=device).to(dtype=dtype)
+    )
     kx_grid = k_x.unsqueeze(1).expand(n_x, n_y)
     ky_grid = k_y.unsqueeze(0).expand(n_x, n_y)
     laplace_eigs = kx_grid * kx_grid + ky_grid * ky_grid
-    inv_laplace_eigs = torch.where(laplace_eigs > 0.0, 1.0 / laplace_eigs, torch.zeros_like(laplace_eigs))
+    inv_laplace_eigs = torch.where(
+        laplace_eigs > 0.0, 1.0 / laplace_eigs, torch.zeros_like(laplace_eigs)
+    )
     dealias_cutoff_x = float(n_x) / 3.0
     dealias_cutoff_y = float(n_y) / 3.0
     dealias_mask = (
-        (torch.abs(torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=device).to(dtype=dtype)).unsqueeze(1).expand(n_x, n_y)
-         <= dealias_cutoff_x)
-        & (torch.abs(torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=device).to(dtype=dtype)).unsqueeze(0).expand(n_x, n_y)
-           <= dealias_cutoff_y)
+        torch.abs(
+            torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=device).to(dtype=dtype)
+        )
+        .unsqueeze(1)
+        .expand(n_x, n_y)
+        <= dealias_cutoff_x
+    ) & (
+        torch.abs(
+            torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=device).to(dtype=dtype)
+        )
+        .unsqueeze(0)
+        .expand(n_x, n_y)
+        <= dealias_cutoff_y
     )
 
     return {
@@ -321,7 +399,9 @@ def pseudospectral_crank_nicolson_step_periodic(
     omega_hat = _fft2(omega_b)
     adv_hat = pseudospectral_advection_term_hat_periodic(omega_b, cache=cache)
 
-    rhs_hat = (1.0 - 0.5 * float(dt) * float(nu) * cache["laplace_eigs"].unsqueeze(0)) * omega_hat
+    rhs_hat = (
+        1.0 - 0.5 * float(dt) * float(nu) * cache["laplace_eigs"].unsqueeze(0)
+    ) * omega_hat
     rhs_hat = rhs_hat - float(dt) * adv_hat
     if forcing_hat is not None:
         rhs_hat = rhs_hat + float(dt) * forcing_hat
@@ -380,7 +460,9 @@ def solve_navier_stokes_vorticity_trajectory_pseudospectral(
 
     forcing_hat = None
     if forcing is not None:
-        forcing_b = to_periodic_field_2d(forcing, n_x=n_x, n_y=n_y).to(device=u0_b.device, dtype=u0_b.dtype)
+        forcing_b = to_periodic_field_2d(forcing, n_x=n_x, n_y=n_y).to(
+            device=u0_b.device, dtype=u0_b.dtype
+        )
         forcing_b = project_zero_mean_2d(forcing_b)
         if forcing_b.shape[0] == 1 and u0_b.shape[0] > 1:
             forcing_b = forcing_b.expand(u0_b.shape[0], -1, -1)
@@ -409,7 +491,13 @@ def solve_navier_stokes_vorticity_trajectory_pseudospectral(
         try:
             from tqdm.auto import tqdm  # type: ignore
 
-            progress = tqdm(step_iter, total=total_steps, desc=progress_desc, leave=False, mininterval=5.0)
+            progress = tqdm(
+                step_iter,
+                total=total_steps,
+                desc=progress_desc,
+                leave=False,
+                mininterval=5.0,
+            )
             step_iter = progress
         except Exception:
             progress = None
@@ -432,7 +520,9 @@ def solve_navier_stokes_vorticity_trajectory_pseudospectral(
         progress.close()
 
     if len(states) != n_records + 1:
-        raise RuntimeError("Internal solver error: recorded an unexpected number of states")
+        raise RuntimeError(
+            "Internal solver error: recorded an unexpected number of states"
+        )
 
     traj = torch.stack(states, dim=1)
     if squeeze:
@@ -519,7 +609,9 @@ def navier_stokes_vorticity_step(
     if forcing is None:
         forcing_int = 0.0
     else:
-        forcing_int = to_periodic_field_2d(forcing, n_x=n_x, n_y=n_y).to(device=omega_b.device, dtype=omega_b.dtype)
+        forcing_int = to_periodic_field_2d(forcing, n_x=n_x, n_y=n_y).to(
+            device=omega_b.device, dtype=omega_b.dtype
+        )
         forcing_int = project_zero_mean_2d(forcing_int)
         if forcing_int.shape[0] == 1 and omega_b.shape[0] > 1:
             forcing_int = forcing_int.expand(omega_b.shape[0], -1, -1)
@@ -527,7 +619,9 @@ def navier_stokes_vorticity_step(
             raise ValueError("forcing batch size must match omega batch size or be 1")
 
     rhs = omega_b - float(dt) * adv + float(dt) * forcing_int
-    omega_next = solve_implicit_diffusion_periodic_2d(rhs=rhs, dt=dt, nu=nu, cache=cache)
+    omega_next = solve_implicit_diffusion_periodic_2d(
+        rhs=rhs, dt=dt, nu=nu, cache=cache
+    )
     omega_next = project_zero_mean_2d(omega_next)
     if squeeze:
         return omega_next.squeeze(0)
@@ -574,7 +668,9 @@ def solve_navier_stokes_vorticity_trajectory(
 
     forcing_int = None
     if forcing is not None:
-        forcing_int = to_periodic_field_2d(forcing, n_x=n_x, n_y=n_y).to(device=u0_b.device, dtype=u0_b.dtype)
+        forcing_int = to_periodic_field_2d(forcing, n_x=n_x, n_y=n_y).to(
+            device=u0_b.device, dtype=u0_b.dtype
+        )
         forcing_int = project_zero_mean_2d(forcing_int)
         if forcing_int.shape[0] == 1 and u0_b.shape[0] > 1:
             forcing_int = forcing_int.expand(u0_b.shape[0], -1, -1)
@@ -593,7 +689,9 @@ def solve_navier_stokes_vorticity_trajectory(
             speed = torch.abs(v_x) / h_x + torch.abs(v_y) / h_y
             max_speed = float(torch.max(speed).item())
             dt_adv = float(cfl_adv) / max(max_speed, 1e-8)
-            dt_stable = dt_adv if max_dt_substep is None else min(dt_adv, float(max_dt_substep))
+            dt_stable = (
+                dt_adv if max_dt_substep is None else min(dt_adv, float(max_dt_substep))
+            )
             dt_sub = min(remaining, max(1e-10, dt_stable))
 
             omega = navier_stokes_vorticity_step(
@@ -637,7 +735,9 @@ def _sample_reference_initial_vorticity(
                 continue
             coeff = torch.randn((), device=device, dtype=dtype) / float(1 + k_x + k_y)
             phase = 2.0 * torch.pi * torch.rand((), device=device, dtype=dtype)
-            field = field + coeff * torch.sin(2.0 * torch.pi * (k_x * xx + k_y * yy) + phase)
+            field = field + coeff * torch.sin(
+                2.0 * torch.pi * (k_x * xx + k_y * yy) + phase
+            )
 
     field = project_zero_mean_2d(field)
     max_abs = torch.max(torch.abs(field)) + 1e-8
@@ -645,15 +745,37 @@ def _sample_reference_initial_vorticity(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run reference 2D periodic Navier-Stokes vorticity solver")
-    parser.add_argument("--n-x", type=int, default=32, help="Number of grid points in x")
-    parser.add_argument("--n-y", type=int, default=32, help="Number of grid points in y")
-    parser.add_argument("--n-steps", type=int, default=10, help="Number of macro time steps on [0,t_final]")
-    parser.add_argument("--t-final", type=float, default=1.0, help="Final simulation time")
+    parser = argparse.ArgumentParser(
+        description="Run reference 2D periodic Navier-Stokes vorticity solver"
+    )
+    parser.add_argument(
+        "--n-x", type=int, default=32, help="Number of grid points in x"
+    )
+    parser.add_argument(
+        "--n-y", type=int, default=32, help="Number of grid points in y"
+    )
+    parser.add_argument(
+        "--n-steps",
+        type=int,
+        default=10,
+        help="Number of macro time steps on [0,t_final]",
+    )
+    parser.add_argument(
+        "--t-final", type=float, default=1.0, help="Final simulation time"
+    )
     parser.add_argument("--nu", type=float, default=0.001, help="Viscosity coefficient")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for sampled initial condition")
-    parser.add_argument("--u0-amplitude", type=float, default=2.0, help="Amplitude of sampled initial vorticity")
-    parser.add_argument("--cfl-adv", type=float, default=0.45, help="Advection CFL safety factor")
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for sampled initial condition"
+    )
+    parser.add_argument(
+        "--u0-amplitude",
+        type=float,
+        default=2.0,
+        help="Amplitude of sampled initial vorticity",
+    )
+    parser.add_argument(
+        "--cfl-adv", type=float, default=0.45, help="Advection CFL safety factor"
+    )
     parser.add_argument("--max-substeps-per-step", type=int, default=4000)
     parser.add_argument(
         "--out-path",

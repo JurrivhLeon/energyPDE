@@ -25,6 +25,7 @@ try:
         StateEncoder2D,
     )
     from ..latent_markov_trainer import rollout_latent_markov_latent_2d
+    from .rollout_diagnostics import compute_rollout_diagnostics
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.latent_markov import (
@@ -35,6 +36,7 @@ except ImportError:
         StateEncoder2D,
     )
     from grad_flow_l2.latent_markov_trainer import rollout_latent_markov_latent_2d
+    from grad_flow_l2.ns2d_per.rollout_diagnostics import compute_rollout_diagnostics
 
 
 def set_seed(seed: int, seed_cuda: bool = False) -> None:
@@ -345,6 +347,7 @@ def _evaluate_rollout_curves(
     rel_h1_curve_median = np.nanmedian(rel_h1.numpy(), axis=0).astype(np.float64)
     rollout_rel_l2 = float((l2_num_sum / (l2_den_sum + 1e-8)).item())
     rollout_rel_h1 = float((h1_num_sum / (h1_den_sum + 1e-12)).item())
+    diagnostics = compute_rollout_diagnostics(u_pred.detach().cpu(), u_ref.detach().cpu(), area=area)
 
     return {
         "rel_curve_mean": rel_curve_mean,
@@ -365,6 +368,7 @@ def _evaluate_rollout_curves(
         "overall_rel_h1_samples": overall_rel_h1_samples,
         "overall_rel_l2": rollout_rel_l2,
         "overall_rel_h1": rollout_rel_h1,
+        **diagnostics,
     }
 
 
@@ -392,14 +396,7 @@ def _save_per_sample_errors_json(curves: Dict[str, np.ndarray], out_path: str) -
         json.dump(items, f, indent=2)
 
 
-def _save_rollout_curve_csv(
-    rel_curve_mean: np.ndarray,
-    rel_curve_median: np.ndarray,
-    rel_h1_curve_mean: np.ndarray,
-    rel_h1_curve_median: np.ndarray,
-    time_values: np.ndarray,
-    out_path: str,
-) -> None:
+def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -411,55 +408,49 @@ def _save_rollout_curve_csv(
                 "rel_l2_median",
                 "rel_h1_mean",
                 "rel_h1_median",
+                "enstrophy_rel_mean",
+                "palinstrophy_rel_mean",
+                "spectrum_rel_mean",
             ]
         )
-        for k in range(len(rel_curve_mean)):
+        for k in range(len(curves["rel_curve_mean"])):
             writer.writerow(
                 [
                     k,
                     f"{float(time_values[k]):.8f}",
-                    f"{float(rel_curve_mean[k]):.12e}",
-                    f"{float(rel_curve_median[k]):.12e}",
-                    f"{float(rel_h1_curve_mean[k]):.12e}",
-                    f"{float(rel_h1_curve_median[k]):.12e}",
+                    f"{float(curves['rel_curve_mean'][k]):.12e}",
+                    f"{float(curves['rel_curve_median'][k]):.12e}",
+                    f"{float(curves['rel_h1_curve_mean'][k]):.12e}",
+                    f"{float(curves['rel_h1_curve_median'][k]):.12e}",
+                    f"{float(curves['enstrophy_rel_curve_mean'][k]):.12e}",
+                    f"{float(curves['palinstrophy_rel_curve_mean'][k]):.12e}",
+                    f"{float(curves['spectrum_rel_curve_mean'][k]):.12e}",
                 ]
             )
     print(f"Saved rollout curve csv: {out_path}")
 
 
-def _plot_rollout_curves(
-    rel_curve_mean: np.ndarray,
-    rel_curve_median: np.ndarray,
-    rel_h1_curve_mean: np.ndarray,
-    rel_h1_curve_median: np.ndarray,
-    time_values: np.ndarray,
-    out_path: str,
-) -> None:
+def _plot_rollout_curves(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(f"Skipping curve plotting because matplotlib is unavailable: {exc}")
         return
 
-    t = time_values[: rel_curve_mean.shape[0]]
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4), squeeze=False)
-    ax1, ax2 = axes[0, 0], axes[0, 1]
-
-    ax1.plot(t, rel_curve_mean, linewidth=2, color="tab:orange", label="mean")
-    ax1.plot(t, rel_curve_median, linewidth=2, linestyle="--", color="tab:green", label="median")
-    ax1.set_title("Rollout Relative L2 Accumulation")
-    ax1.set_xlabel("time")
-    ax1.set_ylabel("relative L2")
-    ax1.legend()
-    ax1.grid(alpha=0.3)
-
-    ax2.plot(t, rel_h1_curve_mean, linewidth=2, color="tab:red", label="mean")
-    ax2.plot(t, rel_h1_curve_median, linewidth=2, linestyle="--", color="tab:purple", label="median")
-    ax2.set_title("Rollout Relative H1 Accumulation")
-    ax2.set_xlabel("time")
-    ax2.set_ylabel("relative H1")
-    ax2.legend()
-    ax2.grid(alpha=0.3)
+    t = time_values[: curves["rel_curve_mean"].shape[0]]
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), squeeze=False)
+    panels = [
+        (axes[0, 0], "rel_curve_mean", "relative L2", "L2", curves["rollout_rel_mean"], "tab:orange"),
+        (axes[0, 1], "rel_h1_curve_mean", "relative H1", "H1", curves["rollout_rel_h1"], "tab:red"),
+        (axes[1, 0], "enstrophy_rel_curve_mean", "relative enstrophy", "Enstrophy", curves["enstrophy_rel_error"], "tab:blue"),
+        (axes[1, 1], "palinstrophy_rel_curve_mean", "relative palinstrophy", "Palinstrophy", curves["palinstrophy_rel_error"], "tab:purple"),
+    ]
+    for ax, key, ylabel, title, aggregate, color in panels:
+        ax.plot(t, curves[key], linewidth=2, color=color)
+        ax.set_title(f"Latent Rollout {title}\nagg={aggregate:.4e}")
+        ax.set_xlabel("time")
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.3)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.tight_layout()
@@ -686,6 +677,9 @@ def main(args: argparse.Namespace) -> None:
     print(f"Split rollout median relative L2: {curves['rollout_rel_median']:.8e}")
     print(f"Split rollout mean relative H1: {curves['rollout_rel_h1']:.8e}")
     print(f"Split rollout median relative H1: {curves['rollout_rel_h1_median']:.8e}")
+    print(f"Split rollout enstrophy relative error: {curves['enstrophy_rel_error']:.8e}")
+    print(f"Split rollout palinstrophy relative error: {curves['palinstrophy_rel_error']:.8e}")
+    print(f"Split rollout spectrum relative error: {curves['spectrum_rel_error']:.8e}")
     print(f"Split rollout std relative L2: {curves['rollout_rel_std']:.8e}")
     print(f"Split rollout std relative H1: {curves['rollout_rel_h1_std']:.8e}")
     print(f"Split max rollout curve relative L2: {curves['rollout_rel_max']:.8e}")
@@ -703,22 +697,8 @@ def main(args: argparse.Namespace) -> None:
 
     curve_csv = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.csv")
     curve_png = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png")
-    _save_rollout_curve_csv(
-        rel_curve_mean=curves["rel_curve_mean"],
-        rel_curve_median=curves["rel_curve_median"],
-        rel_h1_curve_mean=curves["rel_h1_curve_mean"],
-        rel_h1_curve_median=curves["rel_h1_curve_median"],
-        time_values=time_values,
-        out_path=curve_csv,
-    )
-    _plot_rollout_curves(
-        rel_curve_mean=curves["rel_curve_mean"],
-        rel_curve_median=curves["rel_curve_median"],
-        rel_h1_curve_mean=curves["rel_h1_curve_mean"],
-        rel_h1_curve_median=curves["rel_h1_curve_median"],
-        time_values=time_values,
-        out_path=curve_png,
-    )
+    _save_rollout_curve_csv(curves, time_values=time_values, out_path=curve_csv)
+    _plot_rollout_curves(curves, time_values=time_values, out_path=curve_png)
     per_sample_path = os.path.join(args.output_dir, f"{args.split}_per_sample_errors.json")
     _save_per_sample_errors_json(curves, out_path=per_sample_path)
     print(f"Saved per-sample errors: {per_sample_path}")
@@ -761,11 +741,17 @@ def main(args: argparse.Namespace) -> None:
         "rollout_rel_h1_std": curves["rollout_rel_h1_std"],
         "rollout_rel_h1_max": curves["rollout_rel_h1_max"],
         "overall_rel_h1": curves["overall_rel_h1"],
+        "enstrophy_rel_error": curves["enstrophy_rel_error"],
+        "palinstrophy_rel_error": curves["palinstrophy_rel_error"],
+        "spectrum_rel_error": curves["spectrum_rel_error"],
         "field_names": ["vorticity"],
         "rel_curve_mean": curves["rel_curve_mean"].tolist(),
         "rel_curve_median": curves["rel_curve_median"].tolist(),
         "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
         "rel_h1_curve_median": curves["rel_h1_curve_median"].tolist(),
+        "enstrophy_rel_curve_mean": curves["enstrophy_rel_curve_mean"].tolist(),
+        "palinstrophy_rel_curve_mean": curves["palinstrophy_rel_curve_mean"].tolist(),
+        "spectrum_rel_curve_mean": curves["spectrum_rel_curve_mean"].tolist(),
         "snapshot_times": snapshot_times,
         "max_steps": args.max_steps,
         "seed": int(args.seed),

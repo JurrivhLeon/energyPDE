@@ -30,6 +30,7 @@ try:
     from .ns2d_solver import (
         project_zero_mean_2d,
         sample_periodic_gaussian_field_2d,
+        sample_periodic_gaussian_field_2d_fno,
         solve_navier_stokes_vorticity_trajectory_pseudospectral,
         spectral_truncate_periodic_field_2d,
     )
@@ -38,6 +39,7 @@ except ImportError:
     from grad_flow_l2.ns2d_per.ns2d_solver import (
         project_zero_mean_2d,
         sample_periodic_gaussian_field_2d,
+        sample_periodic_gaussian_field_2d_fno,
         solve_navier_stokes_vorticity_trajectory_pseudospectral,
         spectral_truncate_periodic_field_2d,
     )
@@ -458,10 +460,10 @@ def generate_navier_stokes2d_periodic_dataset_splits(
     solver_dt: float = 1e-4,
     record_dt: float = 1.0,
     warmup_time: float = 0.0,
-    u0_spectrum_scale: float = 8.0**1.5,
-    u0_spectrum_shift: float = 4.0,
+    u0_spectrum_scale: float = 7.0**1.5,
+    u0_spectrum_shift: float = 49.0,
     u0_spectrum_power: float = 2.5,
-    u0_rescale: float = 10.0,
+    u0_rescale: float = 1.0,
     forcing_mode: str = "mixed",
     f_grf_linf_min: float = 0.05,
     f_grf_linf_max: float = 0.20,
@@ -536,7 +538,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
     area = h_x * h_y
     device = str(device)
 
-    u0_hr = sample_periodic_gaussian_field_2d(
+    u0_hr = sample_periodic_gaussian_field_2d_fno(
         n_x=solver_n_x,
         n_y=solver_n_y,
         n_samples=total,
@@ -659,6 +661,7 @@ def generate_navier_stokes2d_periodic_dataset_splits(
             "u0_spectrum_shift": float(u0_spectrum_shift),
             "u0_spectrum_power": float(u0_spectrum_power),
             "u0_rescale": float(u0_rescale),
+            "u0_sampler": "fno_periodic_gaussian",
             "f_grf_linf_min": float(f_grf_linf_min),
             "f_grf_linf_max": float(f_grf_linf_max),
             "f_sinusoidal_linf_min": float(f_sinusoidal_linf_min),
@@ -732,10 +735,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-test", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--u0-spectrum-scale", type=float, default=8.0**1.5)
-    parser.add_argument("--u0-spectrum-shift", type=float, default=4.0)
+    parser.add_argument("--u0-spectrum-scale", type=float, default=7.0**1.5)
+    parser.add_argument("--u0-spectrum-shift", type=float, default=49.0)
     parser.add_argument("--u0-spectrum-power", type=float, default=2.5)
-    parser.add_argument("--u0-rescale", type=float, default=10.0)
+    parser.add_argument("--u0-rescale", type=float, default=1.0)
     parser.add_argument(
         "--forcing-mode", type=str, default="mixed", choices=["zero", "mixed"]
     )

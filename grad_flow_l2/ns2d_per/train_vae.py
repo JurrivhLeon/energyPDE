@@ -182,8 +182,8 @@ def rollout_vae_latent_mean(
     traj = traj.reshape(batch_size, traj_len, n_x, n_y)
 
     finite = torch.isfinite(traj).flatten(2).all(dim=2)
-    previous = traj[:, 0]
-    states = [previous]
+    previous = u0
+    states = [u0]
     for step in range(1, traj_len):
         u_next = torch.where(finite[:, step, None, None], traj[:, step], previous)
         if state_clip is not None and float(state_clip) > 0.0:
