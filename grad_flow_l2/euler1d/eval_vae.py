@@ -23,7 +23,6 @@ try:
         resolve_device,
         rollout_vae_mean_1d,
         safe_torch_load,
-        spectral_h1_squared_1d,
     )
     from .euler_data import (
         build_euler1d_step_dataset,
@@ -40,7 +39,6 @@ except ImportError:
         resolve_device,
         rollout_vae_mean_1d,
         safe_torch_load,
-        spectral_h1_squared_1d,
     )
     from grad_flow_l2.euler1d.euler_data import (
         build_euler1d_step_dataset,
@@ -128,8 +126,8 @@ def evaluate_step(model, step_loader, device, dt, channel_weights):
 def evaluate_rollout(model, traj_loader, device, dt, h, domain_length, delta_clip):
     num_batches = []
     den_batches = []
-    h1_num_batches = []
-    h1_den_batches = []
+    l1_num_batches = []
+    l1_den_batches = []
     mse_batches = []
     for batch in traj_loader:
         u0, f, ref = (
@@ -143,80 +141,89 @@ def evaluate_rollout(model, traj_loader, device, dt, h, domain_length, delta_cli
         diff = pred - ref
         num = torch.sqrt(float(h) * diff.square().sum(dim=-1))
         den = torch.sqrt(float(h) * ref.square().sum(dim=-1))
+        l1_num = float(h) * diff.abs().sum(dim=-1)
+        l1_den = float(h) * ref.abs().sum(dim=-1)
         num_batches.append(num.detach().cpu())
         den_batches.append(den.detach().cpu())
+        l1_num_batches.append(l1_num.detach().cpu())
+        l1_den_batches.append(l1_den.detach().cpu())
         mse_batches.append(diff.square().mean(dim=-1).detach().cpu())
-        h1_diff = spectral_h1_squared_1d(diff, domain_length=domain_length)
-        h1_ref = spectral_h1_squared_1d(ref, domain_length=domain_length)
-        h1_num = torch.sqrt(h1_diff)
-        h1_den = torch.sqrt(h1_ref)
-        h1_num_batches.append(h1_num.detach().cpu())
-        h1_den_batches.append(h1_den.detach().cpu())
     num = torch.cat(num_batches, dim=0)[:, 1:]
     den = torch.cat(den_batches, dim=0)[:, 1:]
-    h1_num = torch.cat(h1_num_batches, dim=0)[:, 1:]
-    h1_den = torch.cat(h1_den_batches, dim=0)[:, 1:]
+    l1_num = torch.cat(l1_num_batches, dim=0)[:, 1:]
+    l1_den = torch.cat(l1_den_batches, dim=0)[:, 1:]
     mse = torch.cat(mse_batches, dim=0)[:, 1:]
     rel = num / (den + 1e-8)
-    rel_h1 = h1_num / (h1_den + 1e-12)
+    rel_l1 = l1_num / (l1_den + 1e-8)
     overall_rel_l2_samples = torch.sqrt(torch.sum(num.square(), dim=1)) / (
         torch.sqrt(torch.sum(den.square(), dim=1)) + 1e-8
     )
-    overall_rel_h1_samples = torch.sqrt(torch.sum(h1_num.square(), dim=1)) / (
-        torch.sqrt(torch.sum(h1_den.square(), dim=1)) + 1e-12
+    overall_rel_l1_samples = torch.sum(l1_num, dim=1) / (
+        torch.sum(l1_den, dim=1) + 1e-8
     )
-    rollout_rel_l2_channels = torch.nanmean(overall_rel_l2_samples, dim=0).numpy().astype(np.float64)
-    rollout_rel_h1_channels = torch.nanmean(overall_rel_h1_samples, dim=0).numpy().astype(np.float64)
+    rollout_rel_l2_channels = (
+        torch.nanmean(overall_rel_l2_samples, dim=0).numpy().astype(np.float64)
+    )
+    rollout_rel_l1_channels = (
+        torch.nanmean(overall_rel_l1_samples, dim=0).numpy().astype(np.float64)
+    )
     sample_rel_l2_mean = np.nanmean(overall_rel_l2_samples.numpy(), axis=1)
-    sample_rel_h1_mean = np.nanmean(overall_rel_h1_samples.numpy(), axis=1)
+    sample_rel_l1_mean = np.nanmean(overall_rel_l1_samples.numpy(), axis=1)
     return {
         "rel_curve_mean": rel.mean(dim=0).numpy(),
         "rel_curve_median": rel.median(dim=0).values.numpy(),
-        "rel_h1_curve_mean": rel_h1.mean(dim=0).numpy(),
-        "rel_h1_curve_median": rel_h1.median(dim=0).values.numpy(),
+        "rel_l1_curve_mean": rel_l1.mean(dim=0).numpy(),
+        "rel_l1_curve_median": rel_l1.median(dim=0).values.numpy(),
         "mse_curve_mean": mse.mean(dim=0).numpy(),
         "mse_curve_median": mse.median(dim=0).values.numpy(),
         "rel_samples": rel.numpy().astype(np.float64),
-        "rel_h1_samples": rel_h1.numpy().astype(np.float64),
+        "rel_l1_samples": rel_l1.numpy().astype(np.float64),
         "overall_rel_l2_samples": overall_rel_l2_samples.numpy().astype(np.float64),
-        "overall_rel_h1_samples": overall_rel_h1_samples.numpy().astype(np.float64),
+        "overall_rel_l1_samples": overall_rel_l1_samples.numpy().astype(np.float64),
         "rollout_rel_l2_channels": rollout_rel_l2_channels,
-        "rollout_rel_h1_channels": rollout_rel_h1_channels,
+        "rollout_rel_l1_channels": rollout_rel_l1_channels,
         "rollout_rel_mean": float(np.nanmean(rollout_rel_l2_channels)),
         "rollout_rel_median": float(np.nanmedian(sample_rel_l2_mean)),
-        "rollout_rel_h1_mean": float(np.nanmean(rollout_rel_h1_channels)),
-        "rollout_rel_h1_median": float(np.nanmedian(sample_rel_h1_mean)),
+        "rollout_rel_l1_mean": float(np.nanmean(rollout_rel_l1_channels)),
+        "rollout_rel_l1_median": float(np.nanmedian(sample_rel_l1_mean)),
         "overall_rel_l2": float(np.nanmean(rollout_rel_l2_channels)),
-        "overall_rel_h1": float(np.nanmean(rollout_rel_h1_channels)),
+        "overall_rel_l1": float(np.nanmean(rollout_rel_l1_channels)),
         "overall_rel_l2_global_components": float(np.nanmean(sample_rel_l2_mean)),
-        "overall_rel_h1_global_components": float(np.nanmean(sample_rel_h1_mean)),
+        "overall_rel_l1_global_components": float(np.nanmean(sample_rel_l1_mean)),
     }
 
 
 def _add_rollout_std_metrics(metrics, curves):
     rel_sample_overall = curves["overall_rel_l2_samples"]
-    rel_h1_sample_overall = curves["overall_rel_h1_samples"]
+    rel_l1_sample_overall = curves["overall_rel_l1_samples"]
     for c, name in enumerate(CHANNEL_NAMES):
-        metrics[f"rollout_rel_l2_{name}_std"] = float(np.nanstd(rel_sample_overall[:, c]))
-        metrics[f"rollout_rel_h1_{name}_std"] = float(np.nanstd(rel_h1_sample_overall[:, c]))
-    metrics["rollout_rel_l2_std"] = float(np.nanstd(np.nanmean(rel_sample_overall, axis=1)))
-    metrics["rollout_rel_h1_std"] = float(np.nanstd(np.nanmean(rel_h1_sample_overall, axis=1)))
+        metrics[f"rollout_rel_l2_{name}_std"] = float(
+            np.nanstd(rel_sample_overall[:, c])
+        )
+        metrics[f"rollout_rel_l1_{name}_std"] = float(
+            np.nanstd(rel_l1_sample_overall[:, c])
+        )
+    metrics["rollout_rel_l2_std"] = float(
+        np.nanstd(np.nanmean(rel_sample_overall, axis=1))
+    )
+    metrics["rollout_rel_l1_std"] = float(
+        np.nanstd(np.nanmean(rel_l1_sample_overall, axis=1))
+    )
 
 
 def _add_rollout_max_metrics(metrics, curves):
     rel_curve = curves["rel_curve_mean"]
-    rel_h1_curve = curves["rel_h1_curve_mean"]
+    rel_l1_curve = curves["rel_l1_curve_mean"]
     for c, name in enumerate(CHANNEL_NAMES):
         metrics[f"rollout_rel_l2_{name}_max"] = float(np.nanmax(rel_curve[:, c]))
-        metrics[f"rollout_rel_h1_{name}_max"] = float(np.nanmax(rel_h1_curve[:, c]))
+        metrics[f"rollout_rel_l1_{name}_max"] = float(np.nanmax(rel_l1_curve[:, c]))
     metrics["rollout_rel_l2_max"] = float(np.nanmax(np.nanmean(rel_curve, axis=1)))
-    metrics["rollout_rel_h1_max"] = float(np.nanmax(np.nanmean(rel_h1_curve, axis=1)))
+    metrics["rollout_rel_l1_max"] = float(np.nanmax(np.nanmean(rel_l1_curve, axis=1)))
 
 
 def _stats_dict(values: np.ndarray) -> Dict[str, object]:
     out: Dict[str, object] = {
-        name: values[..., c].tolist()
-        for c, name in enumerate(CHANNEL_NAMES)
+        name: values[..., c].tolist() for c, name in enumerate(CHANNEL_NAMES)
     }
     out["mean"] = np.nanmean(values, axis=-1).tolist()
     return out
@@ -225,18 +232,20 @@ def _stats_dict(values: np.ndarray) -> Dict[str, object]:
 def _save_per_sample_errors_json(curves, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     rel_l2 = curves["rel_samples"]
-    rel_h1 = curves["rel_h1_samples"]
+    rel_l1 = curves["rel_l1_samples"]
     overall_l2 = curves["overall_rel_l2_samples"]
-    overall_h1 = curves["overall_rel_h1_samples"]
+    overall_l1 = curves["overall_rel_l1_samples"]
     items = []
     for sample_idx in range(int(rel_l2.shape[0])):
-        items.append({
-            "sample_index": sample_idx,
-            "rel_l2": _stats_dict(rel_l2[sample_idx]),
-            "rel_h1": _stats_dict(rel_h1[sample_idx]),
-            "overall_rel_l2": _stats_dict(overall_l2[sample_idx]),
-            "overall_rel_h1": _stats_dict(overall_h1[sample_idx]),
-        })
+        items.append(
+            {
+                "sample_index": sample_idx,
+                "rel_l2": _stats_dict(rel_l2[sample_idx]),
+                "rel_l1": _stats_dict(rel_l1[sample_idx]),
+                "overall_rel_l2": _stats_dict(overall_l2[sample_idx]),
+                "overall_rel_l1": _stats_dict(overall_l1[sample_idx]),
+            }
+        )
     with open(path, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
 
@@ -246,7 +255,7 @@ def _save_curve_csv(curves, dt, path):
     with open(path, "w", newline="", encoding="utf-8") as f:
         wr = csv.writer(f)
         header = ["step", "time"]
-        for metric in ("mse", "rel_l2", "rel_h1"):
+        for metric in ("mse", "rel_l2", "rel_l1"):
             for name in CHANNEL_NAMES:
                 header += [f"{metric}_mean_{name}", f"{metric}_median_{name}"]
             header += [f"{metric}_mean_all", f"{metric}_median_all"]
@@ -257,7 +266,7 @@ def _save_curve_csv(curves, dt, path):
             for mean_key, med_key in (
                 ("mse_curve_mean", "mse_curve_median"),
                 ("rel_curve_mean", "rel_curve_median"),
-                ("rel_h1_curve_mean", "rel_h1_curve_median"),
+                ("rel_l1_curve_mean", "rel_l1_curve_median"),
             ):
                 mean = curves[mean_key][k]
                 med = curves[med_key][k]
@@ -277,7 +286,7 @@ def _plot_curve(curves, dt, path):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
     specs = [
         ("rel_curve_mean", "relative L2"),
-        ("rel_h1_curve_mean", "relative H1"),
+        ("rel_l1_curve_mean", "relative L1"),
     ]
     for ax, (key, title) in zip(axes, specs):
         data = curves[key]
@@ -331,13 +340,9 @@ def _plot_samples(
         )[0].cpu()
         abs_err = (pred - ref).abs()
         rel_l2 = relative_l2_error_1d(pred.unsqueeze(0), ref.unsqueeze(0), h=h)[0]
-        h1_diff = spectral_h1_squared_1d(
-            (pred - ref).unsqueeze(0), domain_length=domain_length
-        )[0]
-        h1_ref = spectral_h1_squared_1d(ref.unsqueeze(0), domain_length=domain_length)[
-            0
-        ]
-        rel_h1 = torch.sqrt(h1_diff / (h1_ref + 1e-12))
+        l1_num = float(h) * (pred - ref).abs().sum(dim=-1)
+        l1_den = float(h) * ref.abs().sum(dim=-1)
+        rel_l1 = l1_num / (l1_den + 1e-8)
         fig, axes = plt.subplots(
             4,
             STATE_CHANNELS,
@@ -385,14 +390,14 @@ def _plot_samples(
         for c, name in enumerate(CHANNEL_NAMES):
             axes[3, 0].plot(x, ref[0, c].numpy(), label=name)
             axes[3, 1].plot(times, rel_l2[:, c].numpy(), label=name)
-            axes[3, 2].plot(times, rel_h1[:, c].numpy(), label=name)
+            axes[3, 2].plot(times, rel_l1[:, c].numpy(), label=name)
         axes[3, 1].plot(times, rel_l2.mean(dim=1).numpy(), "k--", label="all")
-        axes[3, 2].plot(times, rel_h1.mean(dim=1).numpy(), "k--", label="all")
+        axes[3, 2].plot(times, rel_l1.mean(dim=1).numpy(), "k--", label="all")
         axes[3, 0].set_title("initial condition")
         axes[3, 0].set_xlabel("x")
         axes[3, 1].set_title("rollout relative L2")
         axes[3, 1].set_xlabel("t")
-        axes[3, 2].set_title("rollout relative H1")
+        axes[3, 2].set_title("rollout relative L1")
         axes[3, 2].set_xlabel("t")
         for ax in axes[3]:
             ax.grid(alpha=0.3)
@@ -460,11 +465,11 @@ def main(args):
     metrics = dict(step_metrics)
     for c, name in enumerate(CHANNEL_NAMES):
         metrics[f"rollout_rel_l2_{name}"] = float(curves["rollout_rel_l2_channels"][c])
-        metrics[f"rollout_rel_h1_{name}"] = float(curves["rollout_rel_h1_channels"][c])
+        metrics[f"rollout_rel_l1_{name}"] = float(curves["rollout_rel_l1_channels"][c])
     metrics["rollout_rel_l2"] = curves["rollout_rel_mean"]
     metrics["rollout_rel_l2_median"] = curves["rollout_rel_median"]
-    metrics["rollout_rel_h1"] = curves["rollout_rel_h1_mean"]
-    metrics["rollout_rel_h1_median"] = curves["rollout_rel_h1_median"]
+    metrics["rollout_rel_l1"] = curves["rollout_rel_l1_mean"]
+    metrics["rollout_rel_l1_median"] = curves["rollout_rel_l1_median"]
     _add_rollout_std_metrics(metrics, curves)
     _add_rollout_max_metrics(metrics, curves)
     print(f"Device: {device}")
@@ -515,11 +520,11 @@ def main(args):
         "delta_clip": delta_clip,
         "metrics": metrics,
         "overall_rel_l2": curves["overall_rel_l2"],
-        "overall_rel_h1": curves["overall_rel_h1"],
+        "overall_rel_l1": curves["overall_rel_l1"],
         "overall_rel_l2_global_components": curves["overall_rel_l2_global_components"],
-        "overall_rel_h1_global_components": curves["overall_rel_h1_global_components"],
+        "overall_rel_l1_global_components": curves["overall_rel_l1_global_components"],
         "rel_l2_curve_mean": curves["rel_curve_mean"].tolist(),
-        "rel_h1_curve_mean": curves["rel_h1_curve_mean"].tolist(),
+        "rel_l1_curve_mean": curves["rel_l1_curve_mean"].tolist(),
         "channel_names": CHANNEL_NAMES,
         "field_names": CHANNEL_NAMES,
         "meta": meta,
