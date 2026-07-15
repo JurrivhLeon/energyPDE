@@ -7,6 +7,7 @@ import json
 import os
 from argparse import Namespace
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -170,6 +171,9 @@ def main(args):
         "n_x": n_x,
         "n_steps": n_steps,
         "dt": dt,
+        "error_time_values": (
+            (np.arange(curves["rel_curve_mean"].shape[0]) + 1) * float(dt)
+        ).tolist(),
         "domain_length": domain_length,
         "delta_clip": delta_clip,
         "metrics": metrics,

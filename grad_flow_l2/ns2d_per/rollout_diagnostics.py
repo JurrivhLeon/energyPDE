@@ -59,15 +59,18 @@ def _radial_energy_spectrum(u: torch.Tensor, area: float) -> torch.Tensor:
 
 
 def _scalar_relative_diagnostics(pred: torch.Tensor, ref: torch.Tensor, eps: float) -> tuple[np.ndarray, float, np.ndarray]:
-    rel_sq = (pred - ref).square() / (ref.square() + eps)
-    curve = torch.sqrt(torch.mean(rel_sq, dim=0)).detach().cpu().numpy().astype(np.float64)
-    aggregate = float(torch.sqrt(torch.mean(rel_sq)).item())
-    samples = torch.sqrt(torch.mean(rel_sq, dim=1)).detach().cpu().numpy().astype(np.float64)
-    return curve, aggregate, samples
+    abs_ref = ref.abs()
+    curve = torch.mean((pred - ref).abs() / (abs_ref + eps), dim=0).detach().cpu().numpy().astype(np.float64)
+    samples = torch.sqrt(torch.sum((pred - ref).square(), dim=1) / (torch.sum(ref.square(), dim=1) + eps))
+    samples_np = samples.detach().cpu().numpy().astype(np.float64)
+    aggregate = float(np.nanmean(samples_np))
+    return curve, aggregate, samples_np
 
 
 def compute_rollout_diagnostics(u_pred: torch.Tensor, u_ref: torch.Tensor, area: float) -> Dict[str, object]:
-    """Compute invariant and spectrum rollout diagnostics for vorticity trajectories."""
+    """Compute invariant and spectrum rollout diagnostics for predicted snapshots only."""
+    u_pred = u_pred[:, 1:]
+    u_ref = u_ref[:, 1:]
     ens_curve, ens_agg, ens_samples = _scalar_relative_diagnostics(
         _enstrophy(u_pred, area), _enstrophy(u_ref, area), eps=1e-24
     )
@@ -81,8 +84,11 @@ def compute_rollout_diagnostics(u_pred: torch.Tensor, u_ref: torch.Tensor, area:
         torch.sum((spec_pred - spec_ref).square(), dim=-1) / (torch.sum(spec_ref.square(), dim=-1) + 1e-24)
     )
     spec_curve = torch.mean(spec_rel, dim=0).detach().cpu().numpy().astype(np.float64)
-    spec_agg = float(torch.mean(spec_rel).item())
-    spec_samples = torch.mean(spec_rel, dim=1).detach().cpu().numpy().astype(np.float64)
+    spec_samples_t = torch.sqrt(
+        torch.sum((spec_pred - spec_ref).square(), dim=(1, 2)) / (torch.sum(spec_ref.square(), dim=(1, 2)) + 1e-24)
+    )
+    spec_samples = spec_samples_t.detach().cpu().numpy().astype(np.float64)
+    spec_agg = float(np.nanmean(spec_samples))
 
     return {
         "enstrophy_rel_curve_mean": ens_curve,

@@ -125,85 +125,79 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
                                delta_clip: Optional[float] = None,
                                rollout_fn: Callable = rollout_latent_markov_2d) -> Dict[str, np.ndarray]:
     """
-    Compute per-channel rollout relative L2 and H1 error curves.
+    Compute rollout relative L2 and H1 errors, excluding the initial snapshot.
 
-    Returns
-    -------
-    rel_curve_mean   : (T+1, C)  - mean  over samples at each step, per channel
-    rel_curve_median : (T+1, C)  - median over samples at each step, per channel
-    rel_samples      : (N, T+1, C) - per-sample relative L2 curves
-    rel_h1_samples   : (N, T+1, C) - per-sample relative H1 curves
-    rollout_rel_mean   : float   - mean of per-channel sum-of-norms ratios
-    rollout_rel_median : float   - median sample-level channel-mean sum-of-norms ratio
+    Curve metrics are per-snapshot relative errors for snapshots 1..T. Scalar
+    rollout metrics first accumulate norms over time for each sample trajectory,
+    then average the resulting ratios equally over samples.
     """
-    rel_batches = []
-    rel_h1_batches = []
-    rel_field_batches = []
-    rel_h1_field_batches = []
-    overall_rel_l2_batches = []
-    overall_rel_h1_batches = []
-    overall_rel_l2_field_batches = []
-    overall_rel_h1_field_batches = []
-    l2_num_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
-    l2_den_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
-    h1_num_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
-    h1_den_sum = torch.zeros(len(CHANNEL_NAMES), device=device)
-    l2_field_num_sum = torch.zeros(len(FIELD_NAMES), device=device)
-    l2_field_den_sum = torch.zeros(len(FIELD_NAMES), device=device)
-    h1_field_num_sum = torch.zeros(len(FIELD_NAMES), device=device)
-    h1_field_den_sum = torch.zeros(len(FIELD_NAMES), device=device)
-    l2_diff_sq_sum = torch.zeros((), device=device)
-    l2_ref_sq_sum = torch.zeros((), device=device)
-    h1_diff_sq_sum = torch.zeros((), device=device)
-    h1_ref_sq_sum = torch.zeros((), device=device)
+    num_batches = []
+    den_batches = []
+    field_num_batches = []
+    field_den_batches = []
+    h1_num_batches = []
+    h1_den_batches = []
+    h1_field_num_batches = []
+    h1_field_den_batches = []
     for batch in traj_loader:
-        u0    = batch["u0"].to(device)
-        f     = batch["f"].to(device)
-        u_ref = batch["u_traj"].to(device)              # (B, T+1, C, H, W)
-        u_pred = rollout_fn(model, u0=u0, f=f,
-                            n_steps=int(u_ref.shape[1] - 1), dt=dt,
-                            delta_clip=delta_clip)
-        diff = u_pred - u_ref                           # (B, T+1, C, H, W)
-        # Per-channel relative L2: sqrt(area * sum_spatial diff^2) / sqrt(area * sum_spatial ref^2)
-        num = torch.sqrt(float(area) * diff.pow(2).sum(dim=(-2, -1)))   # (B, T+1, C)
-        den = torch.sqrt(float(area) * u_ref.pow(2).sum(dim=(-2, -1))) # (B, T+1, C)
-        rel_batches.append((num / (den + 1e-8)).detach().cpu())
+        u0 = batch["u0"].to(device)
+        f = batch["f"].to(device)
+        u_ref = batch["u_traj"].to(device)
+        u_pred = rollout_fn(
+            model,
+            u0=u0,
+            f=f,
+            n_steps=int(u_ref.shape[1] - 1),
+            dt=dt,
+            delta_clip=delta_clip,
+        )
+        diff = u_pred - u_ref
+        num = torch.sqrt(float(area) * diff.pow(2).sum(dim=(-2, -1)))
+        den = torch.sqrt(float(area) * u_ref.pow(2).sum(dim=(-2, -1)))
         field_num = _merge_velocity_norms(num)
         field_den = _merge_velocity_norms(den)
-        rel_field_batches.append((field_num / (field_den + 1e-8)).detach().cpu())
         h1_diff_sq = _spectral_h1_squared_per_channel_2d(diff)
         h1_ref_sq = _spectral_h1_squared_per_channel_2d(u_ref)
         h1_num = torch.sqrt(h1_diff_sq)
         h1_den = torch.sqrt(h1_ref_sq)
-        rel_h1_batches.append((h1_num / (h1_den + 1e-12)).detach().cpu())
         h1_field_num = _merge_velocity_norms(h1_num)
         h1_field_den = _merge_velocity_norms(h1_den)
-        rel_h1_field_batches.append((h1_field_num / (h1_field_den + 1e-12)).detach().cpu())
-        overall_rel_l2_batches.append((num.sum(dim=1) / (den.sum(dim=1) + 1e-8)).detach().cpu())
-        overall_rel_h1_batches.append((h1_num.sum(dim=1) / (h1_den.sum(dim=1) + 1e-12)).detach().cpu())
-        overall_rel_l2_field_batches.append((field_num.sum(dim=1) / (field_den.sum(dim=1) + 1e-8)).detach().cpu())
-        overall_rel_h1_field_batches.append((h1_field_num.sum(dim=1) / (h1_field_den.sum(dim=1) + 1e-12)).detach().cpu())
-        l2_num_sum += num.sum(dim=(0, 1))
-        l2_den_sum += den.sum(dim=(0, 1))
-        h1_num_sum += h1_num.sum(dim=(0, 1))
-        h1_den_sum += h1_den.sum(dim=(0, 1))
-        l2_field_num_sum += field_num.sum(dim=(0, 1))
-        l2_field_den_sum += field_den.sum(dim=(0, 1))
-        h1_field_num_sum += h1_field_num.sum(dim=(0, 1))
-        h1_field_den_sum += h1_field_den.sum(dim=(0, 1))
-        l2_diff_sq_sum += float(area) * torch.sum(diff.square())
-        l2_ref_sq_sum += float(area) * torch.sum(u_ref.square())
-        h1_diff_sq_sum += torch.sum(h1_diff_sq)
-        h1_ref_sq_sum += torch.sum(h1_ref_sq)
+        num_batches.append(num.detach().cpu())
+        den_batches.append(den.detach().cpu())
+        field_num_batches.append(field_num.detach().cpu())
+        field_den_batches.append(field_den.detach().cpu())
+        h1_num_batches.append(h1_num.detach().cpu())
+        h1_den_batches.append(h1_den.detach().cpu())
+        h1_field_num_batches.append(h1_field_num.detach().cpu())
+        h1_field_den_batches.append(h1_field_den.detach().cpu())
 
-    rel = torch.cat(rel_batches, dim=0)                         # (N, T+1, C)
-    rel_h1 = torch.cat(rel_h1_batches, dim=0)                   # (N, T+1, C)
-    rel_field = torch.cat(rel_field_batches, dim=0)             # (N, T+1, 3)
-    rel_h1_field = torch.cat(rel_h1_field_batches, dim=0)       # (N, T+1, 3)
-    overall_rel_l2_samples = torch.cat(overall_rel_l2_batches, dim=0)              # (N, C)
-    overall_rel_h1_samples = torch.cat(overall_rel_h1_batches, dim=0)              # (N, C)
-    overall_rel_l2_field_samples = torch.cat(overall_rel_l2_field_batches, dim=0)  # (N, 3)
-    overall_rel_h1_field_samples = torch.cat(overall_rel_h1_field_batches, dim=0)  # (N, 3)
+    num = torch.cat(num_batches, dim=0)[:, 1:]
+    den = torch.cat(den_batches, dim=0)[:, 1:]
+    field_num = torch.cat(field_num_batches, dim=0)[:, 1:]
+    field_den = torch.cat(field_den_batches, dim=0)[:, 1:]
+    h1_num = torch.cat(h1_num_batches, dim=0)[:, 1:]
+    h1_den = torch.cat(h1_den_batches, dim=0)[:, 1:]
+    h1_field_num = torch.cat(h1_field_num_batches, dim=0)[:, 1:]
+    h1_field_den = torch.cat(h1_field_den_batches, dim=0)[:, 1:]
+
+    rel = num / (den + 1e-8)
+    rel_h1 = h1_num / (h1_den + 1e-12)
+    rel_field = field_num / (field_den + 1e-8)
+    rel_h1_field = h1_field_num / (h1_field_den + 1e-12)
+
+    overall_rel_l2_samples = torch.sqrt(torch.sum(num.square(), dim=1)) / (
+        torch.sqrt(torch.sum(den.square(), dim=1)) + 1e-8
+    )
+    overall_rel_h1_samples = torch.sqrt(torch.sum(h1_num.square(), dim=1)) / (
+        torch.sqrt(torch.sum(h1_den.square(), dim=1)) + 1e-12
+    )
+    overall_rel_l2_field_samples = torch.sqrt(torch.sum(field_num.square(), dim=1)) / (
+        torch.sqrt(torch.sum(field_den.square(), dim=1)) + 1e-8
+    )
+    overall_rel_h1_field_samples = torch.sqrt(torch.sum(h1_field_num.square(), dim=1)) / (
+        torch.sqrt(torch.sum(h1_field_den.square(), dim=1)) + 1e-12
+    )
+
     rel_mean = torch.nanmean(rel, dim=0).numpy().astype(np.float64)
     rel_median = np.nanmedian(rel.numpy(), axis=0).astype(np.float64)
     rel_h1_mean = torch.nanmean(rel_h1, dim=0).numpy().astype(np.float64)
@@ -212,10 +206,10 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
     rel_field_median = np.nanmedian(rel_field.numpy(), axis=0).astype(np.float64)
     rel_h1_field_mean = torch.nanmean(rel_h1_field, dim=0).numpy().astype(np.float64)
     rel_h1_field_median = np.nanmedian(rel_h1_field.numpy(), axis=0).astype(np.float64)
-    rollout_rel_l2_channels = (l2_num_sum / (l2_den_sum + 1e-8)).detach().cpu().numpy().astype(np.float64)
-    rollout_rel_h1_channels = (h1_num_sum / (h1_den_sum + 1e-12)).detach().cpu().numpy().astype(np.float64)
-    rollout_rel_l2_fields = (l2_field_num_sum / (l2_field_den_sum + 1e-8)).detach().cpu().numpy().astype(np.float64)
-    rollout_rel_h1_fields = (h1_field_num_sum / (h1_field_den_sum + 1e-12)).detach().cpu().numpy().astype(np.float64)
+    rollout_rel_l2_channels = torch.nanmean(overall_rel_l2_samples, dim=0).numpy().astype(np.float64)
+    rollout_rel_h1_channels = torch.nanmean(overall_rel_h1_samples, dim=0).numpy().astype(np.float64)
+    rollout_rel_l2_fields = torch.nanmean(overall_rel_l2_field_samples, dim=0).numpy().astype(np.float64)
+    rollout_rel_h1_fields = torch.nanmean(overall_rel_h1_field_samples, dim=0).numpy().astype(np.float64)
     sample_rel_l2_mean = np.nanmean(overall_rel_l2_field_samples.numpy(), axis=1)
     sample_rel_h1_mean = np.nanmean(overall_rel_h1_field_samples.numpy(), axis=1)
     return {
@@ -245,8 +239,8 @@ def _evaluate_rollout_curves(model, traj_loader: DataLoader, device: str,
         "rollout_rel_h1_median": float(np.nanmedian(sample_rel_h1_mean)),
         "overall_rel_l2": float(np.nanmean(rollout_rel_l2_fields)),
         "overall_rel_h1": float(np.nanmean(rollout_rel_h1_fields)),
-        "overall_rel_l2_global_components": float(torch.sqrt(l2_diff_sq_sum / (l2_ref_sq_sum + 1e-12)).item()),
-        "overall_rel_h1_global_components": float(torch.sqrt(h1_diff_sq_sum / (h1_ref_sq_sum + 1e-12)).item()),
+        "overall_rel_l2_global_components": float(np.nanmean(sample_rel_l2_mean)),
+        "overall_rel_h1_global_components": float(np.nanmean(sample_rel_h1_mean)),
     }
 
 
@@ -335,7 +329,7 @@ def _save_curve_csv(curves: Dict[str, np.ndarray], dt: float, path: str) -> None
             header += [f"{prefix}_mean_all", f"{prefix}_median_all"]
         writer.writerow(header)
         for k in range(n_steps):
-            row = [k, f"{k * dt:.8f}"]
+            row = [k + 1, f"{(k + 1) * dt:.8f}"]
             for c in range(n_ch):
                 row += [rel_l2_mean[k, c], rel_l2_median[k, c]]
             row += [rel_l2_field_mean[k, 1], rel_l2_field_median[k, 1]]
@@ -354,7 +348,7 @@ def _plot_curve(curves: Dict[str, np.ndarray], dt: float, path: str) -> None:
         print(f"Skipping curve plot (matplotlib unavailable): {exc}")
         return
 
-    t = np.arange(curves["rel_curve_mean"].shape[0]) * float(dt)
+    t = (np.arange(curves["rel_curve_mean"].shape[0]) + 1) * float(dt)
     colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
     fig, axes = plt.subplots(1, 2, figsize=(14, 4), sharey=False)
     specs = (
@@ -517,6 +511,9 @@ def main(args: argparse.Namespace) -> None:
         "n_y": n_y,
         "n_steps": n_steps,
         "dt": dt,
+        "error_time_values": (
+            (np.arange(curves["rel_curve_mean"].shape[0]) + 1) * float(dt)
+        ).tolist(),
         "evaluation_snapshots": eval_snapshots,
         "stored_snapshots": original_n_steps + 1,
         "delta_clip": delta_clip,

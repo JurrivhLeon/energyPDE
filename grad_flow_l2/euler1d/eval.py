@@ -128,19 +128,11 @@ def evaluate_step(model, step_loader, device, dt, channel_weights):
 
 @torch.no_grad()
 def evaluate_rollout(model, traj_loader, device, dt, h, domain_length, delta_clip):
-    rel_batches = []
-    rel_h1_batches = []
+    num_batches = []
+    den_batches = []
+    h1_num_batches = []
+    h1_den_batches = []
     mse_batches = []
-    overall_rel_l2_batches = []
-    overall_rel_h1_batches = []
-    l2_num_sum = torch.zeros(STATE_CHANNELS, device=device)
-    l2_den_sum = torch.zeros(STATE_CHANNELS, device=device)
-    h1_num_sum = torch.zeros(STATE_CHANNELS, device=device)
-    h1_den_sum = torch.zeros(STATE_CHANNELS, device=device)
-    l2_diff_sq_sum = torch.zeros((), device=device)
-    l2_ref_sq_sum = torch.zeros((), device=device)
-    h1_diff_sq_sum = torch.zeros((), device=device)
-    h1_ref_sq_sum = torch.zeros((), device=device)
     for batch in traj_loader:
         u0, f, ref = (
             batch["u0"].to(device),
@@ -153,30 +145,30 @@ def evaluate_rollout(model, traj_loader, device, dt, h, domain_length, delta_cli
         diff = pred - ref
         num = torch.sqrt(float(h) * diff.square().sum(dim=-1))
         den = torch.sqrt(float(h) * ref.square().sum(dim=-1))
-        rel_batches.append((num / (den + 1e-8)).detach().cpu())
+        num_batches.append(num.detach().cpu())
+        den_batches.append(den.detach().cpu())
         mse_batches.append(diff.square().mean(dim=-1).detach().cpu())
         h1_diff = spectral_h1_squared_1d(diff, domain_length=domain_length)
         h1_ref = spectral_h1_squared_1d(ref, domain_length=domain_length)
         h1_num = torch.sqrt(h1_diff)
         h1_den = torch.sqrt(h1_ref)
-        rel_h1_batches.append((h1_num / (h1_den + 1e-12)).detach().cpu())
-        overall_rel_l2_batches.append((num.sum(dim=1) / (den.sum(dim=1) + 1e-8)).detach().cpu())
-        overall_rel_h1_batches.append((h1_num.sum(dim=1) / (h1_den.sum(dim=1) + 1e-12)).detach().cpu())
-        l2_num_sum += num.sum(dim=(0, 1))
-        l2_den_sum += den.sum(dim=(0, 1))
-        h1_num_sum += h1_num.sum(dim=(0, 1))
-        h1_den_sum += h1_den.sum(dim=(0, 1))
-        l2_diff_sq_sum += float(h) * diff.square().sum()
-        l2_ref_sq_sum += float(h) * ref.square().sum()
-        h1_diff_sq_sum += h1_diff.sum()
-        h1_ref_sq_sum += h1_ref.sum()
-    rel = torch.cat(rel_batches, dim=0)
-    rel_h1 = torch.cat(rel_h1_batches, dim=0)
-    mse = torch.cat(mse_batches, dim=0)
-    overall_rel_l2_samples = torch.cat(overall_rel_l2_batches, dim=0)
-    overall_rel_h1_samples = torch.cat(overall_rel_h1_batches, dim=0)
-    rollout_rel_l2_channels = (l2_num_sum / (l2_den_sum + 1e-8)).detach().cpu().numpy().astype(np.float64)
-    rollout_rel_h1_channels = (h1_num_sum / (h1_den_sum + 1e-12)).detach().cpu().numpy().astype(np.float64)
+        h1_num_batches.append(h1_num.detach().cpu())
+        h1_den_batches.append(h1_den.detach().cpu())
+    num = torch.cat(num_batches, dim=0)[:, 1:]
+    den = torch.cat(den_batches, dim=0)[:, 1:]
+    h1_num = torch.cat(h1_num_batches, dim=0)[:, 1:]
+    h1_den = torch.cat(h1_den_batches, dim=0)[:, 1:]
+    mse = torch.cat(mse_batches, dim=0)[:, 1:]
+    rel = num / (den + 1e-8)
+    rel_h1 = h1_num / (h1_den + 1e-12)
+    overall_rel_l2_samples = torch.sqrt(torch.sum(num.square(), dim=1)) / (
+        torch.sqrt(torch.sum(den.square(), dim=1)) + 1e-8
+    )
+    overall_rel_h1_samples = torch.sqrt(torch.sum(h1_num.square(), dim=1)) / (
+        torch.sqrt(torch.sum(h1_den.square(), dim=1)) + 1e-12
+    )
+    rollout_rel_l2_channels = torch.nanmean(overall_rel_l2_samples, dim=0).numpy().astype(np.float64)
+    rollout_rel_h1_channels = torch.nanmean(overall_rel_h1_samples, dim=0).numpy().astype(np.float64)
     sample_rel_l2_mean = np.nanmean(overall_rel_l2_samples.numpy(), axis=1)
     sample_rel_h1_mean = np.nanmean(overall_rel_h1_samples.numpy(), axis=1)
     return {
@@ -198,8 +190,8 @@ def evaluate_rollout(model, traj_loader, device, dt, h, domain_length, delta_cli
         "rollout_rel_h1_median": float(np.nanmedian(sample_rel_h1_mean)),
         "overall_rel_l2": float(np.nanmean(rollout_rel_l2_channels)),
         "overall_rel_h1": float(np.nanmean(rollout_rel_h1_channels)),
-        "overall_rel_l2_global_components": float(torch.sqrt(l2_diff_sq_sum / (l2_ref_sq_sum + 1e-12)).item()),
-        "overall_rel_h1_global_components": float(torch.sqrt(h1_diff_sq_sum / (h1_ref_sq_sum + 1e-12)).item()),
+        "overall_rel_l2_global_components": float(np.nanmean(sample_rel_l2_mean)),
+        "overall_rel_h1_global_components": float(np.nanmean(sample_rel_h1_mean)),
     }
 
 
@@ -263,7 +255,7 @@ def _save_curve_csv(curves, dt, path):
         wr.writerow(header)
         T = curves["rel_curve_mean"].shape[0]
         for k in range(T):
-            row = [k, f"{k*dt:.8f}"]
+            row = [k + 1, f"{(k + 1) * dt:.8f}"]
             for mean_key, med_key in (
                 ("mse_curve_mean", "mse_curve_median"),
                 ("rel_curve_mean", "rel_curve_median"),
@@ -283,7 +275,7 @@ def _plot_curve(curves, dt, path):
     except Exception as exc:
         print(f"Skipping curve plot: {exc}")
         return
-    t = np.arange(curves["rel_curve_mean"].shape[0]) * float(dt)
+    t = (np.arange(curves["rel_curve_mean"].shape[0]) + 1) * float(dt)
     fig, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
     specs = [("rel_curve_mean", "relative L2"), ("rel_h1_curve_mean", "relative H1")]
     for ax, (key, title) in zip(axes, specs):
@@ -515,6 +507,9 @@ def main(args):
         "n_x": n_x,
         "n_steps": n_steps,
         "dt": dt,
+        "error_time_values": (
+            (np.arange(curves["rel_curve_mean"].shape[0]) + 1) * float(dt)
+        ).tolist(),
         "domain_length": domain_length,
         "delta_clip": delta_clip,
         "metrics": metrics,

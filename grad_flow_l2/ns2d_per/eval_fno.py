@@ -215,18 +215,22 @@ def _evaluate_rollout_curves(
     if h1_num.dim() == 3:
         h1_num = h1_num.sum(dim=-1)
         h1_den = h1_den.sum(dim=-1)
+    num = num[:, 1:]
+    den = den[:, 1:]
+    h1_num = h1_num[:, 1:]
+    h1_den = h1_den[:, 1:]
     rel = num / (den + 1e-8)
     rel_h1 = h1_num / (h1_den + 1e-12)
-    overall_rel_l2_samples = (num.sum(dim=1) / (den.sum(dim=1) + 1e-8)).detach().cpu().numpy().astype(np.float64)
-    overall_rel_h1_samples = (h1_num.sum(dim=1) / (h1_den.sum(dim=1) + 1e-12)).detach().cpu().numpy().astype(np.float64)
+    overall_rel_l2_samples = (torch.sqrt(torch.sum(num.square(), dim=1)) / (torch.sqrt(torch.sum(den.square(), dim=1)) + 1e-8)).detach().cpu().numpy().astype(np.float64)
+    overall_rel_h1_samples = (torch.sqrt(torch.sum(h1_num.square(), dim=1)) / (torch.sqrt(torch.sum(h1_den.square(), dim=1)) + 1e-12)).detach().cpu().numpy().astype(np.float64)
     rel_cpu = rel.detach().cpu()
     rel_h1_cpu = rel_h1.detach().cpu()
     rel_curve_mean = torch.nanmean(rel_cpu, dim=0).numpy().astype(np.float64)
     rel_curve_median = np.nanmedian(rel_cpu.numpy(), axis=0).astype(np.float64)
     rel_h1_curve_mean = torch.nanmean(rel_h1_cpu, dim=0).numpy().astype(np.float64)
     rel_h1_curve_median = np.nanmedian(rel_h1_cpu.numpy(), axis=0).astype(np.float64)
-    rollout_rel_l2 = float((num.sum() / (den.sum() + 1e-8)).item())
-    rollout_rel_h1 = float((h1_num.sum() / (h1_den.sum() + 1e-12)).item())
+    rollout_rel_l2 = float(np.nanmean(overall_rel_l2_samples))
+    rollout_rel_h1 = float(np.nanmean(overall_rel_h1_samples))
     diagnostics = compute_rollout_diagnostics(u_pred.detach().cpu(), u_ref.detach().cpu(), area=area)
 
     return {
@@ -294,7 +298,7 @@ def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], time_values: np.ndarr
         for k in range(len(curves["rel_curve_mean"])):
             writer.writerow([
                 k,
-                f"{float(time_values[k]):.8f}",
+                f"{float(time_values[k + 1]):.8f}",
                 f"{float(curves['rel_curve_mean'][k]):.12e}",
                 f"{float(curves['rel_curve_median'][k]):.12e}",
                 f"{float(curves['rel_h1_curve_mean'][k]):.12e}",
@@ -313,7 +317,7 @@ def _plot_rollout_curves(curves: Dict[str, np.ndarray], time_values: np.ndarray,
         print(f"Skipping curve plotting because matplotlib is unavailable: {exc}")
         return
 
-    t = time_values[: curves["rel_curve_mean"].shape[0]]
+    t = time_values[1 : 1 + curves["rel_curve_mean"].shape[0]]
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), squeeze=False)
     panels = [
         (axes[0, 0], "rel_curve_mean", "relative L2", "L2", curves["rollout_rel_mean"], "tab:orange"),
@@ -503,7 +507,7 @@ def main(args: argparse.Namespace) -> None:
     print("Rollout accumulation by step (step, time, rel_l2_mean, rel_l2_median, rel_h1_mean, rel_h1_median):")
     for k in range(len(curves["rel_curve_mean"])):
         print(
-            f"  {k:03d}  {float(time_values[k]):8.4f}  "
+            f"  {k + 1:03d}  {float(time_values[k + 1]):8.4f}  "
             f"{curves['rel_curve_mean'][k]:.8e}  {curves['rel_curve_median'][k]:.8e}  "
             f"{curves['rel_h1_curve_mean'][k]:.8e}  {curves['rel_h1_curve_median'][k]:.8e}"
         )
@@ -540,6 +544,7 @@ def main(args: argparse.Namespace) -> None:
         "t_start": t_start,
         "t_final": t_final,
         "time_values": time_values.tolist(),
+        "error_time_values": time_values[1 : 1 + len(curves["rel_curve_mean"])].tolist(),
         "delta_clip": args.delta_clip,
         "step_mse": step_mse,
         "rollout_rel_l2": curves["rollout_rel_mean"],
