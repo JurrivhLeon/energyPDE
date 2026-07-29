@@ -253,6 +253,42 @@ def _random_fourier_field(
     return float(amplitude) * field
 
 
+def sample_periodic_grf_1d(
+    n_x: int,
+    n_samples: int,
+    domain_length: float,
+    length_scale: float,
+    variance: float = 1.0,
+    zero_mean: bool = True,
+    normalize: bool = True,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float64,
+) -> torch.Tensor:
+    if n_x <= 0 or n_samples < 0:
+        raise ValueError("n_x must be positive and n_samples must be nonnegative")
+    if domain_length <= 0.0:
+        raise ValueError("domain_length must be positive")
+    if length_scale <= 0.0:
+        raise ValueError("length_scale must be positive")
+    if variance < 0.0:
+        raise ValueError("variance must be nonnegative")
+
+    freq = torch.fft.rfftfreq(int(n_x), d=float(domain_length) / float(n_x)).to(device=device, dtype=dtype)
+    power = float(variance) * torch.exp(-0.5 * (2.0 * np.pi * float(length_scale) * freq).square())
+    if zero_mean:
+        power[0] = 0.0
+
+    complex_dtype = torch.complex128 if dtype == torch.float64 else torch.complex64
+    coeff = torch.randn(n_samples, power.numel(), device=device, dtype=complex_dtype)
+    coeff = coeff * torch.sqrt(power.clamp_min(0.0)).to(complex_dtype).view(1, -1)
+    field = torch.fft.irfft(coeff, n=int(n_x), dim=-1).to(dtype=dtype)
+    if zero_mean:
+        field = field - field.mean(dim=-1, keepdim=True)
+    if normalize:
+        field = field / (field.square().mean(dim=-1, keepdim=True).sqrt() + 1e-8)
+    return field
+
+
 def downsample_periodic_primitive(q: torch.Tensor, target_n_x: int) -> torch.Tensor:
     """Downsample periodic primitive states by conservative average pooling."""
     if q.shape[-1] == target_n_x:
@@ -290,6 +326,68 @@ def sample_euler1d_initial_conditions(
 
     base_sound = torch.sqrt(torch.tensor(float(gamma) * float(p0) / float(rho0), device=device, dtype=dtype))
     vel_shape = _random_fourier_field(n_x, n_samples, 1.0, max_modes, decay, device, dtype)
+    mach = torch.empty(n_samples, 1, device=device, dtype=dtype).uniform_(float(mach_min), float(mach_max))
+    u = mach * base_sound * vel_shape
+    return torch.stack([rho, u, p], dim=1)
+
+
+def sample_euler1d_grf_initial_conditions(
+    n_x: int,
+    n_samples: int,
+    domain_length: float,
+    gamma: float = 1.4,
+    rho0: float = 1.0,
+    rho_amp: float = 0.15,
+    p0: float = 1.0,
+    p_amp: float = 0.10,
+    mach_min: float = 0.05,
+    mach_max: float = 0.35,
+    length_scale: float = 1.0,
+    variance: float = 1.0,
+    normalize: bool = True,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float64,
+) -> torch.Tensor:
+    rho_field = sample_periodic_grf_1d(
+        n_x=n_x,
+        n_samples=n_samples,
+        domain_length=domain_length,
+        length_scale=length_scale,
+        variance=variance,
+        zero_mean=True,
+        normalize=normalize,
+        device=device,
+        dtype=dtype,
+    )
+    p_field = sample_periodic_grf_1d(
+        n_x=n_x,
+        n_samples=n_samples,
+        domain_length=domain_length,
+        length_scale=length_scale,
+        variance=variance,
+        zero_mean=True,
+        normalize=normalize,
+        device=device,
+        dtype=dtype,
+    )
+    vel_shape = sample_periodic_grf_1d(
+        n_x=n_x,
+        n_samples=n_samples,
+        domain_length=domain_length,
+        length_scale=length_scale,
+        variance=variance,
+        zero_mean=True,
+        normalize=True,
+        device=device,
+        dtype=dtype,
+    )
+
+    rho = float(rho0) * (1.0 + float(rho_amp) * rho_field)
+    p = float(p0) * (1.0 + float(p_amp) * p_field)
+    rho = rho.clamp_min(0.1 * float(rho0))
+    p = p.clamp_min(0.1 * float(p0))
+
+    base_sound = torch.sqrt(torch.tensor(float(gamma) * float(p0) / float(rho0), device=device, dtype=dtype))
     mach = torch.empty(n_samples, 1, device=device, dtype=dtype).uniform_(float(mach_min), float(mach_max))
     u = mach * base_sound * vel_shape
     return torch.stack([rho, u, p], dim=1)
@@ -363,6 +461,9 @@ def generate_euler1d_dataset_splits(
     ic_type: str = "smooth",
     boundary_condition: str = "periodic",
     x0_middle_fraction: float = 0.2,
+    grf_length_scale: float = 1.0,
+    grf_variance: float = 1.0,
+    grf_normalize: bool = True,
     solve_batch_size: int = 32,
     max_substeps: int = 100000,
     seed: int = 42,
@@ -414,8 +515,27 @@ def generate_euler1d_dataset_splits(
             dtype=dtype,
             x0_middle_fraction=x0_middle_fraction,
         )
+    elif ic in {"grf", "periodic_grf", "gaussian", "periodic_gaussian"}:
+        ic = "periodic_grf"
+        u0_all = sample_euler1d_grf_initial_conditions(
+            n_x=solve_n_x,
+            n_samples=total,
+            domain_length=domain_length,
+            gamma=gamma,
+            rho0=rho0,
+            rho_amp=rho_amp,
+            p0=p0,
+            p_amp=p_amp,
+            mach_min=mach_min,
+            mach_max=mach_max,
+            length_scale=grf_length_scale,
+            variance=grf_variance,
+            normalize=grf_normalize,
+            device=device,
+            dtype=dtype,
+        )
     else:
-        raise ValueError("ic_type must be one of {smooth,shocktube}")
+        raise ValueError("ic_type must be one of {smooth,shocktube,grf,periodic_grf}")
     f_all = torch.zeros(total, n_x, dtype=output_dtype)
 
     starts = range(0, total, int(solve_batch_size))
@@ -458,6 +578,9 @@ def generate_euler1d_dataset_splits(
             "solver_boundary_condition": bc,
             "ic_type": ic,
             "x0_middle_fraction": float(x0_middle_fraction),
+            "grf_length_scale": float(grf_length_scale),
+            "grf_variance": float(grf_variance),
+            "grf_normalize": bool(grf_normalize),
             "n_x": int(n_x),
             "solver_n_x": int(solve_n_x),
             "n_steps": int(n_steps),
@@ -536,9 +659,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mach-max", type=float, default=0.35)
     p.add_argument("--max-modes", type=int, default=5)
     p.add_argument("--decay", type=float, default=2.0)
-    p.add_argument("--ic-type", type=str, default="smooth", choices=["smooth", "shocktube"])
+    p.add_argument("--ic-type", type=str, default="smooth", choices=["smooth", "shocktube", "grf", "periodic_grf"])
     p.add_argument("--boundary-condition", type=str, default="periodic", choices=["periodic", "outflow", "transmissive", "neumann"])
     p.add_argument("--x0-middle-fraction", type=float, default=0.2)
+    p.add_argument("--grf-length-scale", type=float, default=1.0)
+    p.add_argument("--grf-variance", type=float, default=1.0)
+    p.add_argument("--no-grf-normalize", action="store_true")
     p.add_argument("--solve-batch-size", type=int, default=32)
     p.add_argument("--max-substeps", type=int, default=100000)
     p.add_argument("--seed", type=int, default=42)
@@ -571,6 +697,9 @@ def main(args: argparse.Namespace) -> None:
         ic_type=args.ic_type,
         boundary_condition=args.boundary_condition,
         x0_middle_fraction=args.x0_middle_fraction,
+        grf_length_scale=args.grf_length_scale,
+        grf_variance=args.grf_variance,
+        grf_normalize=not args.no_grf_normalize,
         solve_batch_size=args.solve_batch_size,
         max_substeps=args.max_substeps,
         seed=args.seed,
