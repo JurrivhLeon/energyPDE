@@ -35,17 +35,33 @@ def set_seed(seed: int, seed_cuda: bool = False) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate and visualize periodic 2D Navier-Stokes physical FNO")
+    parser = argparse.ArgumentParser(
+        description="Evaluate and visualize periodic 2D Navier-Stokes physical FNO"
+    )
     parser.add_argument("--dataset-path", type=str, required=True)
     parser.add_argument("--checkpoint-path", type=str, required=True)
-    parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
+    parser.add_argument(
+        "--split", type=str, default="test", choices=["train", "val", "test"]
+    )
     parser.add_argument("--n-plot-samples", type=int, default=6)
     parser.add_argument("--snapshot-times", type=str, default="0,2,4,6,8,10")
-    parser.add_argument("--delta-clip", type=float, default=10.0, help="Use <=0 to disable rollout increment clipping.")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs_fno/eval")
+    parser.add_argument(
+        "--delta-clip",
+        type=float,
+        default=10.0,
+        help="Use <=0 to disable rollout increment clipping.",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs_fno/eval"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--max-steps", type=int, default=None, help="If set, truncate trajectories to this many steps.")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="If set, truncate trajectories to this many steps.",
+    )
 
     # Fallback architecture args used only when args.json is unavailable.
     parser.add_argument("--state-channels", type=int, default=None)
@@ -58,9 +74,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-dt-channel", action="store_true")
     parser.add_argument("--disable-forcing-channel", action="store_true")
     parser.add_argument("--no-residual", action="store_true")
-    #parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Fallback FNO lift-noise std when args.json is unavailable; inactive during eval.")
-    #parser.add_argument("--lift-noise-corr-length", type=float, default=1.0, help="Fallback Matern correlation length for FNO lift noise.")
-    #parser.add_argument("--lift-noise-decay-s", type=float, default=2.0, help="Fallback spectral decay exponent s for FNO lift noise.")
+    # parser.add_argument("--lift-noise-std", type=float, default=0.0, help="Fallback FNO lift-noise std when args.json is unavailable; inactive during eval.")
+    # parser.add_argument("--lift-noise-corr-length", type=float, default=1.0, help="Fallback Matern correlation length for FNO lift noise.")
+    # parser.add_argument("--lift-noise-decay-s", type=float, default=2.0, help="Fallback spectral decay exponent s for FNO lift noise.")
     return parser.parse_args()
 
 
@@ -71,7 +87,9 @@ def _load_checkpoint(checkpoint_path: str, map_location):
         msg = str(exc)
         if "weights_only=True" not in msg or "legacy .tar format" not in msg:
             raise
-        return torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
 
 
 def _load_train_args(checkpoint_path: str) -> Namespace:
@@ -145,24 +163,39 @@ def _build_model(n_x: int, n_y: int, dt: float, split: dict, args, train_args) -
         n_layers=int(getattr(train_args, "fno_layers", args.fno_layers)),
         modes_x=int(getattr(train_args, "fno_modes_x", args.fno_modes_x)),
         modes_y=int(getattr(train_args, "fno_modes_y", args.fno_modes_y)),
-        use_forcing_channel=not bool(getattr(train_args, "disable_forcing_channel", args.disable_forcing_channel)),
+        use_forcing_channel=not bool(
+            getattr(train_args, "disable_forcing_channel", args.disable_forcing_channel)
+        ),
         use_dt_channel=bool(getattr(train_args, "use_dt_channel", args.use_dt_channel)),
-        use_grid_features=not bool(getattr(train_args, "disable_fno_grid", args.disable_fno_grid)),
+        use_grid_features=not bool(
+            getattr(train_args, "disable_fno_grid", args.disable_fno_grid)
+        ),
         default_dt=dt,
         residual=not bool(getattr(train_args, "no_residual", args.no_residual)),
-        #lift_noise_std=float(getattr(train_args, "lift_noise_std", args.lift_noise_std)),
-        #lift_noise_corr_length=float(getattr(train_args, "lift_noise_corr_length", args.lift_noise_corr_length)),
-        #lift_noise_decay_s=float(getattr(train_args, "lift_noise_decay_s", args.lift_noise_decay_s)),
+        # lift_noise_std=float(getattr(train_args, "lift_noise_std", args.lift_noise_std)),
+        # lift_noise_corr_length=float(getattr(train_args, "lift_noise_corr_length", args.lift_noise_corr_length)),
+        # lift_noise_decay_s=float(getattr(train_args, "lift_noise_decay_s", args.lift_noise_decay_s)),
     )
 
 
 @torch.no_grad()
-def _rollout(model: FNO2D, u0: torch.Tensor, f: torch.Tensor, n_steps: int, dt: float, delta_clip: float | None):
-    return rollout_fno_2d(model, u0=u0, f=f, n_steps=n_steps, dt=dt, delta_clip=delta_clip)
+def _rollout(
+    model: FNO2D,
+    u0: torch.Tensor,
+    f: torch.Tensor,
+    n_steps: int,
+    dt: float,
+    delta_clip: float | None,
+):
+    return rollout_fno_2d(
+        model, u0=u0, f=f, n_steps=n_steps, dt=dt, delta_clip=delta_clip
+    )
 
 
 @torch.no_grad()
-def _evaluate_one_step_mse(model: FNO2D, split: Dict[str, torch.Tensor], device: str, dt: float) -> float:
+def _evaluate_one_step_mse(
+    model: FNO2D, split: Dict[str, torch.Tensor], device: str, dt: float
+) -> float:
     u_traj = split["u_traj"].to(device)
     f = split["f"].to(device)
     total_sq = 0.0
@@ -180,8 +213,20 @@ def _spectral_h1_norm_2d(u: torch.Tensor) -> torch.Tensor:
     n_y = int(u.shape[-1])
     u_hat = torch.fft.fft2(u, dim=(-2, -1), norm="ortho")
     real_dtype = u.real.dtype
-    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u.device).to(dtype=real_dtype)
-    ky = 2.0 * torch.pi * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u.device).to(dtype=real_dtype)
+    kx = (
+        2.0
+        * torch.pi
+        * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u.device).to(
+            dtype=real_dtype
+        )
+    )
+    ky = (
+        2.0
+        * torch.pi
+        * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u.device).to(
+            dtype=real_dtype
+        )
+    )
     kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
     weight = 1.0 + kx_grid.square() + ky_grid.square()
     power = u_hat.real.square() + u_hat.imag.square()
@@ -204,7 +249,9 @@ def _evaluate_rollout_curves(
     u0 = split["u0"].to(device)
     f = split["f"].to(device)
     u_ref = split["u_traj"].to(device)
-    u_pred = _rollout(model, u0=u0, f=f, n_steps=int(u_ref.shape[1] - 1), dt=dt, delta_clip=delta_clip)
+    u_pred = _rollout(
+        model, u0=u0, f=f, n_steps=int(u_ref.shape[1] - 1), dt=dt, delta_clip=delta_clip
+    )
 
     diff = u_pred - u_ref
     reduce_dims = _state_reduce_dims(u_ref)
@@ -221,8 +268,26 @@ def _evaluate_rollout_curves(
     h1_den = h1_den[:, 1:]
     rel = num / (den + 1e-8)
     rel_h1 = h1_num / (h1_den + 1e-12)
-    overall_rel_l2_samples = (torch.sqrt(torch.sum(num.square(), dim=1)) / (torch.sqrt(torch.sum(den.square(), dim=1)) + 1e-8)).detach().cpu().numpy().astype(np.float64)
-    overall_rel_h1_samples = (torch.sqrt(torch.sum(h1_num.square(), dim=1)) / (torch.sqrt(torch.sum(h1_den.square(), dim=1)) + 1e-12)).detach().cpu().numpy().astype(np.float64)
+    overall_rel_l2_samples = (
+        (
+            torch.sqrt(torch.sum(num.square(), dim=1))
+            / (torch.sqrt(torch.sum(den.square(), dim=1)) + 1e-8)
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
+    overall_rel_h1_samples = (
+        (
+            torch.sqrt(torch.sum(h1_num.square(), dim=1))
+            / (torch.sqrt(torch.sum(h1_den.square(), dim=1)) + 1e-12)
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
     rel_cpu = rel.detach().cpu()
     rel_h1_cpu = rel_h1.detach().cpu()
     rel_curve_mean = torch.nanmean(rel_cpu, dim=0).numpy().astype(np.float64)
@@ -231,7 +296,9 @@ def _evaluate_rollout_curves(
     rel_h1_curve_median = np.nanmedian(rel_h1_cpu.numpy(), axis=0).astype(np.float64)
     rollout_rel_l2 = float(np.nanmean(overall_rel_l2_samples))
     rollout_rel_h1 = float(np.nanmean(overall_rel_h1_samples))
-    diagnostics = compute_rollout_diagnostics(u_pred.detach().cpu(), u_ref.detach().cpu(), area=area)
+    diagnostics = compute_rollout_diagnostics(
+        u_pred.detach().cpu(), u_ref.detach().cpu(), area=area
+    )
 
     return {
         "rel_curve_mean": rel_curve_mean,
@@ -267,50 +334,73 @@ def _save_per_sample_errors_json(curves: Dict[str, np.ndarray], out_path: str) -
     rel_h1 = curves["rel_h1_samples"]
     overall_l2 = curves["overall_rel_l2_samples"]
     overall_h1 = curves["overall_rel_h1_samples"]
+    enstrophy = curves.get("enstrophy_rel_curve_samples")
+    palinstrophy = curves.get("palinstrophy_rel_curve_samples")
+    overall_enstrophy = curves.get("enstrophy_rel_samples")
+    overall_palinstrophy = curves.get("palinstrophy_rel_samples")
     items = []
     for sample_idx in range(int(rel_l2.shape[0])):
-        items.append({
+        item = {
             "sample_index": sample_idx,
             "rel_l2": _sample_stats(rel_l2[sample_idx]),
             "rel_h1": _sample_stats(rel_h1[sample_idx]),
             "overall_rel_l2": _sample_stats(overall_l2[sample_idx]),
             "overall_rel_h1": _sample_stats(overall_h1[sample_idx]),
-        })
+        }
+        if enstrophy is not None:
+            item["enstrophy_rel"] = _sample_stats(enstrophy[sample_idx])
+        if palinstrophy is not None:
+            item["palinstrophy_rel"] = _sample_stats(palinstrophy[sample_idx])
+        if overall_enstrophy is not None:
+            item["overall_enstrophy_rel"] = _sample_stats(overall_enstrophy[sample_idx])
+        if overall_palinstrophy is not None:
+            item["overall_palinstrophy_rel"] = _sample_stats(
+                overall_palinstrophy[sample_idx]
+            )
+        items.append(item)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
 
 
-def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
+def _save_rollout_curve_csv(
+    curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str
+) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "step",
-            "time",
-            "rel_l2_mean",
-            "rel_l2_median",
-            "rel_h1_mean",
-            "rel_h1_median",
-            "enstrophy_rel_mean",
-            "palinstrophy_rel_mean",
-            "spectrum_rel_mean",
-        ])
+        writer.writerow(
+            [
+                "step",
+                "time",
+                "rel_l2_mean",
+                "rel_l2_median",
+                "rel_h1_mean",
+                "rel_h1_median",
+                "enstrophy_rel_mean",
+                "palinstrophy_rel_mean",
+                "spectrum_rel_mean",
+            ]
+        )
         for k in range(len(curves["rel_curve_mean"])):
-            writer.writerow([
-                k,
-                f"{float(time_values[k + 1]):.8f}",
-                f"{float(curves['rel_curve_mean'][k]):.12e}",
-                f"{float(curves['rel_curve_median'][k]):.12e}",
-                f"{float(curves['rel_h1_curve_mean'][k]):.12e}",
-                f"{float(curves['rel_h1_curve_median'][k]):.12e}",
-                f"{float(curves['enstrophy_rel_curve_mean'][k]):.12e}",
-                f"{float(curves['palinstrophy_rel_curve_mean'][k]):.12e}",
-                f"{float(curves['spectrum_rel_curve_mean'][k]):.12e}",
-            ])
+            writer.writerow(
+                [
+                    k,
+                    f"{float(time_values[k + 1]):.8f}",
+                    f"{float(curves['rel_curve_mean'][k]):.12e}",
+                    f"{float(curves['rel_curve_median'][k]):.12e}",
+                    f"{float(curves['rel_h1_curve_mean'][k]):.12e}",
+                    f"{float(curves['rel_h1_curve_median'][k]):.12e}",
+                    f"{float(curves['enstrophy_rel_curve_mean'][k]):.12e}",
+                    f"{float(curves['palinstrophy_rel_curve_mean'][k]):.12e}",
+                    f"{float(curves['spectrum_rel_curve_mean'][k]):.12e}",
+                ]
+            )
     print(f"Saved rollout curve csv: {out_path}")
 
 
-def _plot_rollout_curves(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
+def _plot_rollout_curves(
+    curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str
+) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
@@ -320,10 +410,38 @@ def _plot_rollout_curves(curves: Dict[str, np.ndarray], time_values: np.ndarray,
     t = time_values[1 : 1 + curves["rel_curve_mean"].shape[0]]
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), squeeze=False)
     panels = [
-        (axes[0, 0], "rel_curve_mean", "relative L2", "L2", curves["rollout_rel_mean"], "tab:orange"),
-        (axes[0, 1], "rel_h1_curve_mean", "relative H1", "H1", curves["rollout_rel_h1"], "tab:red"),
-        (axes[1, 0], "enstrophy_rel_curve_mean", "relative enstrophy", "Enstrophy", curves["enstrophy_rel_error"], "tab:blue"),
-        (axes[1, 1], "palinstrophy_rel_curve_mean", "relative palinstrophy", "Palinstrophy", curves["palinstrophy_rel_error"], "tab:purple"),
+        (
+            axes[0, 0],
+            "rel_curve_mean",
+            "relative L2",
+            "L2",
+            curves["rollout_rel_mean"],
+            "tab:orange",
+        ),
+        (
+            axes[0, 1],
+            "rel_h1_curve_mean",
+            "relative H1",
+            "H1",
+            curves["rollout_rel_h1"],
+            "tab:red",
+        ),
+        (
+            axes[1, 0],
+            "enstrophy_rel_curve_mean",
+            "relative enstrophy",
+            "Enstrophy",
+            curves["enstrophy_rel_error"],
+            "tab:blue",
+        ),
+        (
+            axes[1, 1],
+            "palinstrophy_rel_curve_mean",
+            "relative palinstrophy",
+            "Palinstrophy",
+            curves["palinstrophy_rel_error"],
+            "tab:purple",
+        ),
     ]
     for ax, key, ylabel, title, aggregate, color in panels:
         ax.plot(t, curves[key], linewidth=2, color=color)
@@ -376,7 +494,9 @@ def _plot_test_samples(
         u0_i = u0[sample_id : sample_id + 1].to(device)
         f_i = f[sample_id : sample_id + 1].to(device)
         u_ref_i = u_traj[sample_id]
-        u_pred_i = _rollout(model, u0_i, f_i, n_steps=n_steps, dt=dt, delta_clip=delta_clip)[0].cpu()
+        u_pred_i = _rollout(
+            model, u0_i, f_i, n_steps=n_steps, dt=dt, delta_clip=delta_clip
+        )[0].cpu()
         diff_i = u_pred_i - u_ref_i
         reduce_dims = (-3, -2, -1) if u_ref_i.dim() == 4 else (-2, -1)
         num_i = torch.sqrt(area * torch.sum(diff_i * diff_i, dim=reduce_dims))
@@ -390,10 +510,26 @@ def _plot_test_samples(
             f_plot = f_plot[0]
         state_ref = u_ref_i[:, 0] if u_ref_i.dim() == 4 else u_ref_i
         state_pred = u_pred_i[:, 0] if u_pred_i.dim() == 4 else u_pred_i
-        state_scale = max(float(torch.max(torch.abs(state_ref)).item()), float(torch.max(torch.abs(state_pred)).item()), 1e-8)
+        state_scale = max(
+            float(torch.max(torch.abs(state_ref)).item()),
+            float(torch.max(torch.abs(state_pred)).item()),
+            1e-8,
+        )
 
-        fig, axes = plt.subplots(3, n_cols, figsize=(3.1 * n_cols, 8.0), squeeze=False, constrained_layout=True)
-        im_force = axes[0, 0].imshow(f_plot.cpu().numpy(), origin="lower", cmap="coolwarm", extent=[0.0, 1.0, 0.0, 1.0], aspect="auto")
+        fig, axes = plt.subplots(
+            3,
+            n_cols,
+            figsize=(3.1 * n_cols, 8.0),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        im_force = axes[0, 0].imshow(
+            f_plot.cpu().numpy(),
+            origin="lower",
+            cmap="coolwarm",
+            extent=[0.0, 1.0, 0.0, 1.0],
+            aspect="auto",
+        )
         axes[0, 0].set_title("forcing")
         axes[0, 0].set_xticks([])
         axes[0, 0].set_yticks([])
@@ -403,7 +539,9 @@ def _plot_test_samples(
         axes[2, 0].text(0.5, 0.5, "abs error", ha="center", va="center", fontsize=12)
         if snapshot_times and snapshot_times[0] <= 0.0:
             axes[2, 1].axis("off")
-            axes[2, 1].text(0.5, 0.5, "t=0 exact init", ha="center", va="center", fontsize=11)
+            axes[2, 1].text(
+                0.5, 0.5, "t=0 exact init", ha="center", va="center", fontsize=11
+            )
 
         im_ref_last = im_force
         im_err_last = None
@@ -418,29 +556,62 @@ def _plot_test_samples(
             ax_ref = axes[0, j]
             ax_pred = axes[1, j]
             ax_err = axes[2, j]
-            im_ref = ax_ref.imshow(u_ref_k.cpu().numpy(), origin="lower", cmap="coolwarm", vmin=-state_scale, vmax=state_scale, extent=[0.0, 1.0, 0.0, 1.0], aspect="auto")
+            im_ref = ax_ref.imshow(
+                u_ref_k.cpu().numpy(),
+                origin="lower",
+                cmap="coolwarm",
+                vmin=-state_scale,
+                vmax=state_scale,
+                extent=[0.0, 1.0, 0.0, 1.0],
+                aspect="auto",
+            )
             ax_ref.set_title(f"ref t={t_label:g}")
             ax_ref.set_xticks([])
             ax_ref.set_yticks([])
-            ax_pred.imshow(u_pred_k.cpu().numpy(), origin="lower", cmap="coolwarm", vmin=-state_scale, vmax=state_scale, extent=[0.0, 1.0, 0.0, 1.0], aspect="auto")
+            ax_pred.imshow(
+                u_pred_k.cpu().numpy(),
+                origin="lower",
+                cmap="coolwarm",
+                vmin=-state_scale,
+                vmax=state_scale,
+                extent=[0.0, 1.0, 0.0, 1.0],
+                aspect="auto",
+            )
             ax_pred.set_title(f"pred t={t_label:g}")
             ax_pred.set_xticks([])
             ax_pred.set_yticks([])
             im_ref_last = im_ref
             if k > 0:
-                im_err = ax_err.imshow(err_k.cpu().numpy(), origin="lower", cmap="magma", extent=[0.0, 1.0, 0.0, 1.0], aspect="auto")
+                im_err = ax_err.imshow(
+                    err_k.cpu().numpy(),
+                    origin="lower",
+                    cmap="magma",
+                    extent=[0.0, 1.0, 0.0, 1.0],
+                    aspect="auto",
+                )
                 ax_err.set_xticks([])
                 ax_err.set_yticks([])
                 im_err_last = im_err
                 ax_err.set_title(f"|err| t={t_label:g}\nrelL2={rel_k:.3e}")
             else:
                 ax_err.axis("off")
-                ax_err.text(0.5, 0.5, f"t={t_label:g} exact init", ha="center", va="center", fontsize=11)
+                ax_err.text(
+                    0.5,
+                    0.5,
+                    f"t={t_label:g} exact init",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                )
 
-        cbar_state = fig.colorbar(im_ref_last, ax=axes[0:2, 1:], fraction=0.015, pad=0.01)
+        cbar_state = fig.colorbar(
+            im_ref_last, ax=axes[0:2, 1:], fraction=0.015, pad=0.01
+        )
         cbar_state.ax.set_ylabel("state value", rotation=90)
         if im_err_last is not None and len(error_snapshot_times) > 0:
-            cbar_err = fig.colorbar(im_err_last, ax=axes[2, error_start_col:], fraction=0.015, pad=0.01)
+            cbar_err = fig.colorbar(
+                im_err_last, ax=axes[2, error_start_col:], fraction=0.015, pad=0.01
+            )
             cbar_err.ax.set_ylabel("abs error", rotation=90)
         cbar_f = fig.colorbar(im_force, ax=[axes[0, 0]], fraction=0.046, pad=0.02)
         cbar_f.ax.set_ylabel("forcing", rotation=90)
@@ -472,10 +643,16 @@ def main(args: argparse.Namespace) -> None:
     dt, t_start, t_final, time_values = _time_metadata(meta, n_steps=n_steps)
     if args.max_steps is not None:
         n_steps = min(int(args.max_steps), n_steps)
-        split = {**split, "u_traj": split["u_traj"][:, : n_steps + 1], "u0": split["u_traj"][:, 0].clone()}
+        split = {
+            **split,
+            "u_traj": split["u_traj"][:, : n_steps + 1],
+            "u0": split["u_traj"][:, 0].clone(),
+        }
         time_values = time_values[: n_steps + 1]
         t_final = float(time_values[-1])
-    snapshot_times = _parse_snapshot_times(args.snapshot_times, t_start=t_start, t_end=t_final)
+    snapshot_times = _parse_snapshot_times(
+        args.snapshot_times, t_start=t_start, t_end=t_final
+    )
     delta_clip = args.delta_clip if args.delta_clip > 0.0 else None
 
     train_args = _load_train_args(args.checkpoint_path)
@@ -486,25 +663,35 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"Device: {device}")
     print(f"Loaded split={args.split} from {args.dataset_path}")
-    print(f"Grid: n_x={n_x}, n_y={n_y}, n_steps={n_steps}, stored_time=[{t_start:.6f},{t_final:.6f}], dt={dt:.6f}")
+    print(
+        f"Grid: n_x={n_x}, n_y={n_y}, n_steps={n_steps}, stored_time=[{t_start:.6f},{t_final:.6f}], dt={dt:.6f}"
+    )
     print(f"Delta clip (L-inf): {args.delta_clip:.6f}")
     print(f"Loaded checkpoint: {args.checkpoint_path}")
 
     step_mse = _evaluate_one_step_mse(model, split, device=device, dt=dt)
-    curves = _evaluate_rollout_curves(model, split, device=device, dt=dt, area=area, delta_clip=delta_clip)
+    curves = _evaluate_rollout_curves(
+        model, split, device=device, dt=dt, area=area, delta_clip=delta_clip
+    )
     print(f"Split one-step MSE: {step_mse:.8e}")
     print(f"Split rollout mean relative L2: {curves['rollout_rel_mean']:.8e}")
     print(f"Split rollout median relative L2: {curves['rollout_rel_median']:.8e}")
     print(f"Split rollout mean relative H1: {curves['rollout_rel_h1']:.8e}")
     print(f"Split rollout median relative H1: {curves['rollout_rel_h1_median']:.8e}")
-    print(f"Split rollout enstrophy relative error: {curves['enstrophy_rel_error']:.8e}")
-    print(f"Split rollout palinstrophy relative error: {curves['palinstrophy_rel_error']:.8e}")
+    print(
+        f"Split rollout enstrophy relative error: {curves['enstrophy_rel_error']:.8e}"
+    )
+    print(
+        f"Split rollout palinstrophy relative error: {curves['palinstrophy_rel_error']:.8e}"
+    )
     print(f"Split rollout spectrum relative error: {curves['spectrum_rel_error']:.8e}")
     print(f"Split rollout std relative L2: {curves['rollout_rel_std']:.8e}")
     print(f"Split rollout std relative H1: {curves['rollout_rel_h1_std']:.8e}")
     print(f"Split max rollout curve relative L2: {curves['rollout_rel_max']:.8e}")
     print(f"Split max rollout curve relative H1: {curves['rollout_rel_h1_max']:.8e}")
-    print("Rollout accumulation by step (step, time, rel_l2_mean, rel_l2_median, rel_h1_mean, rel_h1_median):")
+    print(
+        "Rollout accumulation by step (step, time, rel_l2_mean, rel_l2_median, rel_h1_mean, rel_h1_median):"
+    )
     for k in range(len(curves["rel_curve_mean"])):
         print(
             f"  {k + 1:03d}  {float(time_values[k + 1]):8.4f}  "
@@ -516,7 +703,9 @@ def main(args: argparse.Namespace) -> None:
     curve_png = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png")
     _save_rollout_curve_csv(curves, time_values=time_values, out_path=curve_csv)
     _plot_rollout_curves(curves, time_values=time_values, out_path=curve_png)
-    per_sample_path = os.path.join(args.output_dir, f"{args.split}_per_sample_errors.json")
+    per_sample_path = os.path.join(
+        args.output_dir, f"{args.split}_per_sample_errors.json"
+    )
     _save_per_sample_errors_json(curves, out_path=per_sample_path)
     print(f"Saved per-sample errors: {per_sample_path}")
 
@@ -544,7 +733,9 @@ def main(args: argparse.Namespace) -> None:
         "t_start": t_start,
         "t_final": t_final,
         "time_values": time_values.tolist(),
-        "error_time_values": time_values[1 : 1 + len(curves["rel_curve_mean"])].tolist(),
+        "error_time_values": time_values[
+            1 : 1 + len(curves["rel_curve_mean"])
+        ].tolist(),
         "delta_clip": args.delta_clip,
         "step_mse": step_mse,
         "rollout_rel_l2": curves["rollout_rel_mean"],
