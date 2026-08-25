@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--viscosities",
         type=int,
         nargs="+",
-        default=[4, 5],
+        default=[3],
         help="Viscosity exponents to plot, e.g. 4 means nu=1e-4.",
     )
     parser.add_argument(
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sample-indices",
         type=str,
-        default="0,136",
+        default="180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199",
         help="Comma-separated sample indices from the selected split.",
     )
     parser.add_argument("--max-steps", type=int, default=None)
