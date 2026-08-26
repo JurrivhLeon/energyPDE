@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--viscosities",
         type=int,
         nargs="+",
-        default=[3],
+        default=[3,4,5],
         help="Viscosity exponents to plot, e.g. 4 means nu=1e-4.",
     )
     parser.add_argument(
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sample-indices",
         type=str,
-        default="180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199",
+        default="0,70,136,177",
         help="Comma-separated sample indices from the selected split.",
     )
     parser.add_argument("--max-steps", type=int, default=None)
@@ -148,6 +148,12 @@ def _field_scale(arrays: List[np.ndarray]) -> float:
         if finite.size:
             vmax = max(vmax, float(np.max(np.abs(finite))))
     return max(vmax, 1e-8)
+
+
+def _vamo_first(items: List[Tuple[str, np.ndarray]]) -> List[Tuple[str, np.ndarray]]:
+    vamo = [item for item in items if "vamo" in item[0].lower()]
+    others = [item for item in items if "vamo" not in item[0].lower()]
+    return vamo + others
 
 
 TRAINING_HORIZONS = {3: 10.0, 4: 12.0, 5: 8.0}
@@ -302,7 +308,7 @@ def _plot_sample(
     cbar_force = fig.colorbar(im_force, cax=cax_force)
     cbar_force.ax.tick_params(labelsize=12)
 
-    row_items: List[Tuple[str, np.ndarray]] = [("Groundtruth", true_traj)] + pred_arrays
+    row_items: List[Tuple[str, np.ndarray]] = [("Groundtruth", true_traj)] + _vamo_first(pred_arrays)
     time_items = [(0, 0.0)] + [(int(idx), float(t_val)) for idx, t_val in zip(snap_idx, snap_times)]
     last_im = None
     for row, (row_label, traj) in enumerate(row_items):

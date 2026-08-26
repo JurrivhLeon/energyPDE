@@ -384,6 +384,12 @@ def _channel_limits(
     return float(np.nanmin(values)), float(np.nanmax(values))
 
 
+def _vamo_first(items: List[Tuple[str, np.ndarray]]) -> List[Tuple[str, np.ndarray]]:
+    vamo = [item for item in items if "vamo" in item[0].lower()]
+    others = [item for item in items if "vamo" not in item[0].lower()]
+    return vamo + others
+
+
 def _plot_sample(
     output_dir: Path,
     sample_id: int,
@@ -424,6 +430,7 @@ def _plot_sample(
     grid_w = n_cols * cell_w + (n_cols - 2) * col_gap + ic_gap
     cbar_x = grid_left + grid_w + cbar_gap
 
+    pred_arrays = _vamo_first(pred_arrays)
     row_labels = ["Groundtruth"] + [label for label, _traj in pred_arrays]
     col_labels = ["IC"] + ["t=" + str(step * 0.1) for step in steps]
 
