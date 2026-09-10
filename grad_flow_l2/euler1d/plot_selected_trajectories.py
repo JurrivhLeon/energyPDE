@@ -19,6 +19,7 @@ try:
     from .common import (
         CHANNEL_NAMES,
         rollout_model_1d,
+        rollout_vae_latent_mean_1d,
         rollout_vae_mean_1d,
         safe_torch_load,
     )
@@ -30,6 +31,7 @@ except ImportError:
     from grad_flow_l2.euler1d.common import (
         CHANNEL_NAMES,
         rollout_model_1d,
+        rollout_vae_latent_mean_1d,
         rollout_vae_mean_1d,
         safe_torch_load,
     )
@@ -274,8 +276,17 @@ def _rollout_vae(
     delta_clip = (
         None if delta_clip is None or float(delta_clip) <= 0 else float(delta_clip)
     )
+    rollout_mode = str(
+        summary.get(
+            "rollout_mode",
+            ckpt.get("rollout_mode", getattr(train_args, "rollout_mode", "latent")),
+        )
+    ).lower()
+    rollout_fn = (
+        rollout_vae_latent_mean_1d if rollout_mode == "latent" else rollout_vae_mean_1d
+    )
     return (
-        rollout_vae_mean_1d(
+        rollout_fn(
             model,
             split["u0"].to(device),
             split["f"].to(device),
