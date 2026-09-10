@@ -271,7 +271,7 @@ class PeriodicLatentVAETrainer2D:
 
         mu_p, prior_logvar_scalar = self.model.prior_stats(z_k, f, dt=self.dt)
         alpha = torch.exp(0.5 * prior_logvar_scalar)
-        if sample:
+        if sample and not getattr(self.model, "disable_transition_noise", False):
             noise = self._filtered_noise_for_training(mu_p.shape, device=mu_p.device, dtype=mu_p.dtype)
             z_next = mu_p + alpha.view(-1, 1, 1, 1) * noise
         else:
@@ -413,6 +413,8 @@ class PeriodicLatentVAETrainer2D:
                 "alpha_max": self.alpha_max,
                 "lr": self.optimizer.param_groups[0]["lr"],
                 "rollout_mode": self.rollout_mode,
+                "disable_encoder_noise": getattr(self.model, "disable_encoder_noise", False),
+                "disable_transition_noise": getattr(self.model, "disable_transition_noise", False),
             },
             os.path.join(self.output_dir, name),
         )
@@ -552,6 +554,16 @@ def parse_args() -> argparse.Namespace:
         default=1e-2,
         help="Jitter added to the spectral transition variance used by the training sampler.",
     )
+    parser.add_argument(
+        "--disable-encoder-noise",
+        action="store_true",
+        help="Use the encoder posterior mean during stochastic training instead of sampling encoder noise.",
+    )
+    parser.add_argument(
+        "--disable-transition-noise",
+        action="store_true",
+        help="Use the transition mean in the prediction loss instead of sampling transition noise.",
+    )
     parser.add_argument("--alpha-min", type=float, default=1e-4)
     parser.add_argument("--alpha-max", type=float, default=0.5)
     parser.add_argument("--alpha-init", type=float, default=0.075)
@@ -684,6 +696,8 @@ def _build_model(n_x: int, n_y: int, dt: float, args: argparse.Namespace) -> Per
         encoder_noise_corr_length=getattr(args, "encoder_noise_corr_length", None),
         alpha_min=alpha_min,
         alpha_max=alpha_max,
+        disable_encoder_noise=bool(getattr(args, "disable_encoder_noise", False)),
+        disable_transition_noise=bool(getattr(args, "disable_transition_noise", False)),
     )
 
 
@@ -889,6 +903,8 @@ def main(args: argparse.Namespace) -> None:
         f"encoder_noise_corr_length={args.encoder_noise_corr_length}, "
         f"noise_decay_s={args.noise_decay_s}, "
         f"spectral_var_floor={args.spectral_var_floor}, "
+        f"disable_encoder_noise={args.disable_encoder_noise}, "
+        f"disable_transition_noise={args.disable_transition_noise}, "
         f"rollout_mode={args.rollout_mode}, "
         f"epoch_pbar={not args.no_epoch_pbar}, "
         f"train_time=[{t_window_start:.6f},{t_window_end:.6f}], output={run_dir}"

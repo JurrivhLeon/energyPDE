@@ -470,6 +470,8 @@ class LatentVAE1D(nn.Module):
         alpha_is_bounded: bool = True,
         alpha_min: float = 1e-4,
         alpha_max: float = 0.5,
+        disable_encoder_noise: bool = False,
+        disable_transition_noise: bool = False,
     ):
         super().__init__()
         if noise_corr_length <= 0.0:
@@ -487,6 +489,8 @@ class LatentVAE1D(nn.Module):
         self.noise_corr_length = float(noise_corr_length)
         self.encoder_noise_corr_length = float(encoder_noise_corr_length)
         self.noise_decay_s = float(noise_decay_s)
+        self.disable_encoder_noise = bool(disable_encoder_noise)
+        self.disable_transition_noise = bool(disable_transition_noise)
         self.alpha_is_bounded = bool(alpha_is_bounded)
         if self.alpha_is_bounded:
             self.alpha_min = float(alpha_min)
@@ -506,6 +510,8 @@ class LatentVAE1D(nn.Module):
         return self.encoder(u)
 
     def sample_posterior(self, mu_q: torch.Tensor, logvar_q: torch.Tensor) -> torch.Tensor:
+        if self.disable_encoder_noise:
+            return mu_q
         logvar_q = torch.clamp(logvar_q, min=-8.0, max=2.0)
         std = torch.exp(0.5 * logvar_q)
         noise = self._filtered_noise(
@@ -543,6 +549,8 @@ class LatentVAE1D(nn.Module):
     def sample_prior(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu_p, prior_logvar_scalar = self.prior_stats(z, f, dt=dt)
         alpha = torch.exp(0.5 * prior_logvar_scalar)
+        if self.disable_transition_noise:
+            return mu_p, mu_p, alpha
         noise = self._filtered_noise(mu_p.shape, device=mu_p.device, dtype=mu_p.dtype)
         z_next = mu_p + alpha.view(-1, 1, 1) * noise
         return z_next, mu_p, alpha
@@ -856,6 +864,8 @@ class PeriodicLatentVAE2D(nn.Module):
         alpha_min: float = 1e-4,
         alpha_max: float = 0.5,
         transition_noise_scale: float = 1.0,
+        disable_encoder_noise: bool = False,
+        disable_transition_noise: bool = False,
     ):
         super().__init__()
         if noise_corr_length <= 0.0:
@@ -877,6 +887,8 @@ class PeriodicLatentVAE2D(nn.Module):
         self.alpha_min = float(alpha_min)
         self.alpha_max = float(alpha_max)
         self.transition_noise_scale = float(transition_noise_scale)
+        self.disable_encoder_noise = bool(disable_encoder_noise)
+        self.disable_transition_noise = bool(disable_transition_noise)
         if self.alpha_min < 0.0 or self.alpha_max <= self.alpha_min:
             raise ValueError("alpha bounds must satisfy 0 <= alpha_min < alpha_max")
         if self.transition_noise_scale < 0.0:
@@ -898,6 +910,8 @@ class PeriodicLatentVAE2D(nn.Module):
         return self.encoder(u)
 
     def sample_posterior(self, mu_q: torch.Tensor, logvar_q: torch.Tensor) -> torch.Tensor:
+        if self.disable_encoder_noise:
+            return mu_q
         logvar_q = torch.clamp(logvar_q, min=-8.0, max=2.0)
         std = torch.exp(0.5 * logvar_q)
         noise = self._filtered_noise(
@@ -936,6 +950,8 @@ class PeriodicLatentVAE2D(nn.Module):
     def sample_prior(self, z: torch.Tensor, f: torch.Tensor, dt=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu_p, prior_logvar_scalar = self.prior_stats(z, f, dt=dt)
         alpha = torch.exp(0.5 * prior_logvar_scalar)
+        if self.disable_transition_noise:
+            return mu_p, mu_p, alpha
         noise = self._filtered_noise(mu_p.shape, device=mu_p.device, dtype=mu_p.dtype)
         z_next = mu_p + alpha.view(-1, 1, 1, 1) * noise
         return z_next, mu_p, alpha

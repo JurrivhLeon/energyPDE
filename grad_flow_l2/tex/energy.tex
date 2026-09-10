@@ -1,0 +1,624 @@
+\pdfoutput=1
+\documentclass[11pt]{article}
+\usepackage[OT1]{fontenc}
+\usepackage{smile}
+\usepackage{subcaption}
+\usepackage[margin=1in]{geometry}
+\renewcommand{\baselinestretch}{1.10}
+%%%%%%%%%%%%-- Comments --%%%%%%%%%%%%
+%%%%%%%%%%%%-- new command --%%%%%%%%%%%%
+
+
+% Custom commands matching your notation
+\newcommand{\calN}{\mathcal{N}}
+\newcommand{\calL}{\mathcal{L}}
+\newcommand{\thetavec}{\bm{\theta}}
+\newcommand{\calA}{\mathcal{A}}
+\newcommand{\bbP}{\mathbb{P}}
+\newcommand{\bbR}{\mathbb{R}}
+\newcommand{\bbE}{\mathbb{E}}
+\renewcommand{\d}{\mathrm{d}}
+\newcommand{\wh}{\widehat}
+\newcommand{\wt}{\widetilde}
+\newcommand{\ol}{\overline}
+%%%%%%%%%%%%-- start --%%%%%%%%%%%%%%%
+\title{\bf Learning PDE Solution Operators via Transformer-based Models}
+\author{Junyi Liao}
+\date{}
+\begin{document}
+\maketitle
+
+%%%%%%%%%%%%-- main content --%%%%%%%%%%
+\section{Introduction}
+Partial differential equations (PDEs) form the mathematical foundation for modeling physical, biological, and engineering systems. Phenomena such as fluid flow, heat transfer, electromagnetics, elasticity, and subsurface transport are governed by PDEs, and their numerical solution is central to scientific computing and engineering design. However, high-fidelity applications such as inverse design and uncertainty quantification often require solving PDEs thousands of times, making the computational cost of traditional numerical evaluation a prohibitive bottleneck.
+
+Classical numerical methods, such as finite element methods (FEM), finite volumes, or spectral schemes, provide accurate and stable approximations but face well-known challenges. They require meshing of the domain, which becomes costly for highly irregular geometries, and their computational cost scales poorly with resolution. More importantly, classical solvers do not generalize: each new coefficient field, boundary condition, or geometry requires solving a fresh linear or nonlinear system from scratch. In recent years, physics-informed neural networks (PINNs, \citealp{raissi2019physics}) have been proposed as mesh-free alternatives. However, they frequently suffer from optimi]zation instability and stiffness, limiting their reliability for multi-scale problems.
+
+A recent paradigm, \textbf{operator learning}, addresses these limitations by learning the solution mapping itself. Instead of solving for a single instance, it  aims to learn the mapping $G^*:a\mapsto u$, where $a$ denotes the coefficient functions, forcing term, or initial/boundary conditions, and $u$ is the corresponding PDE solution. Once such a surrogate model is trained, solving the PDE for any new input $a$ requires only a single forward pass through a neural network, which acts as rapid, discretization-invariant evaluators, offering orders-of-magnitude speedups and the flexibility to handle varying grid resolutions .
+
+\subsection{Related Works}
+\paragraph{Operator Learning.} Given a parametric PDE $L(a,u)=0$, where $u$ is the unknown and $a$ specifies the PDE (e.g. $a$ contains coefficients, initial/boundary conditions, etc), learn the solution operator $G^*:a\mapsto u$ with a neural operator $G_\theta$:
+\begin{equation*}
+    \underset{\theta}{\argmin}\,\bbE_{a\sim\mathrm{data}}\left[\mathcal{L}(G^*(a),G_\theta(a))\right].
+\end{equation*}
+\begin{itemize}
+    \item \cite{li2020fourier} proposes Fourier neural operator (FNO), which parametrizes the integral kernel directly in Fourier space and performs the operator learning in the Fourier (spectral) domain. It applies a linear transform on the Fourier coefficients of the input, which is equivalent to a global convolution. This is extremely efficient and particularly effective for equations where interactions are global, like in fluid dynamics.
+    \item \cite{cao2021choose} proposes a three-stage \textbf{Encoder–Transformer–Decoder} framework for operator learning. The encoder pushes the input function $a$ from the physical to a latent domain, while the decoder reconstructs the transformed latent function $v$ back to the physical space. By replacing the softmax with a \textbf{linearized self-attention} mechanism, the transformer layer effectively performs a Petrov–Galerkin projection, connecting attention to numerical operator discretization.
+    
+    \item \cite{li2022transformer} proposes operator transformer (OFormer), which employs two attention modules for PDE operator learning. The \textbf{self-attention} module captures the information of input function $a$ at input coordinates, and the \textbf{cross-attention} module handles arbitrary query coordinates based on the encoded features at input coordinates. For time-dependent PDEs, a latent time propagator models temporal evolution within the transformer's latent space.
+    
+    
+    \item\cite{hao2023gnot} adapts the transformer to handle irregular meshes (not just uniform grids) and multiple input functions. It's designed to be a more scalable and flexible framework for general operator learning. It realizes the transformation $a\mapsto u$ through an efficient \textbf{heterogeneous normalized cross-attention} that linearly fuses information from multiple input fields (coefficients, boundaries, parameters) into query-point embeddings, followed by a self-attention refinement over query features. This cross → self attention design approximates integral operators in latent space while keeping computation linear in the number of spatial points. After that, a complementary \textbf{geometric-gating mechanism}, analogous to a coordinate-conditioned mixture-of-experts, allows different subnetworks to specialize to distinct spatial regions or physical scales, enabling soft domain decomposition for complex PDEs.
+    
+    \item Based on the encoder-transformer-decoder framework, \cite{chen2024positional} introduces a \textbf{position-induced attention} mechanism. Instead of relying only on the values at different points (like in standard self-attention), it explicitly incorporates the relative spatial positions of the points, which is more aligned with the principles of numerical PDE solvers. In the encoding and decoding stage, the local positional attention is applied to capture the local behavior of input and output functions, and in the transformer stacks, global positional attention is applied to handle the evolution in the latent space.
+    
+    \item\cite{calvello2024continuum} formulates a continuum version of attention directly in function spaces (not just discrete tokens) and proves universal approximation results for transformer neural operators. To make this formulation computationally tractable, they introduce a \textbf{patching scheme} analogous to the Vision Transformer (ViT), where local regions of the domain are treated as patches to approximate the continuous attention integral. This strategy allows transformers to scale efficiently to high-dimensional PDE domains while preserving locality and continuity.
+    
+    \item\cite{boya2025pinto} studies a particular case of operator learning, where the input $a$ are IC/BC conditions (initial/boundary coordinates + values). PINTO models the solution operator using a \textbf{cross-attention} pipeline that fuses boundary/initial data into pointwise interior representations. It lifts inputs with three small encoders: Query Point Encoding (QPE) for query coordinates $X$ (interior or space–time points), Boundary Position Encoding (BPE) for boundary coordinates $X_b$, and Boundary Value Encoding (BVE) for boundary values $a(X_b)$ (Dirichlet/Neumann). Each block performs cross-attention where queries come from QPE and keys/values come from BPE/BVE, iteratively refining a boundary-aware latent at each query point. After that, a lightweight MLP decodes this latent to the solution $u(X)$. An advantage of this approach is that training is \textbf{physics-only}: the model minimizes PDE residuals on interior collocation points plus boundary-condition penalties, with no paired simulation data required, which enables strong generalization to unseen IC/BC and adaptable resolution without mesh constraints.
+\end{itemize}
+\paragraph{Koopman Operators.}
+\begin{itemize}
+\item\cite{geneva2022transformers} introduces a Koopman-based Transformer framework for surrogate modeling of nonlinear dynamical systems governed by ODEs and PDEs. The authors first train a \textbf{Koopman embedding autoencoder} that learns latent variables evolving linearly under a learned, banded Koopman matrix, thereby providing physics-aware representations of system states. A GPT-style \textbf{Transformer decoder} is then trained in this latent space to autoregressively predict future embeddings, leveraging self-attention to capture multi-scale temporal dependencies.
+
+\item\href{https://arxiv.org/pdf/2412.02430}{\it Transformer-Based Koopman Autoencoder for Linearizing Fisher’s Equation (Rana and Kumari, 2024).}
+\end{itemize}
+
+\paragraph{In-Context Learning.}
+\begin{itemize}
+    \item \cite{yang2023context} proposes In-Context Operator Network (ICON), which is a Transformer-based encoder-decoder architecture for solving differential equations. The encoder, a self-attention transformer, processes a ``prompt''—which includes example ``demos'' (condition / solution pairs) and the new ``question condition''—to generate a single ``operator and question embedding''. This embedding, which now represents the learned operator and the specific problem, is then fed into the decoder, a cross-attention transformer. The decoder combines this embedding with user-provided ``queries'' (the specific points where the solution is desired) to predict the final solution values. At inference, the model can observe a few demos (condition–solution pairs) from an unseen operator, internally infer its rule, and predict the output for new conditions.
+
+    \item\cite{yang2024pde} extends the In-Context Operator Network (ICON) framework and introduces a language-model-style training paradigm where the model predicts each solution function (Quantity of Interest, QoI) sequentially from preceding condition–QoI pairs, which is analogous to “next-token prediction” in language models. Using 1D nonlinear conservation laws as a testbed, ICON learns both forward and reverse operators (predicting future or past states) directly from simulation data generated by WENO schemes, without physics priors or weight updates at inference.
+
+    \item\cite{cole2024context} studies in-context learning of linear systems, and analyses generalization (in-domain vs out-of-domain) and relates it to operator learning for PDEs.
+\end{itemize}
+
+\paragraph{Variational Methods.}
+\begin{itemize}
+\item\cite{patel2024variationally} proposes the Variationally Mimetic Operator Network (VarMION), a deep learning architecture designed to approximate the solution operators of Partial Differential Equations (PDEs) by explicitly mimicking the mathematical structure of their variational (weak) formulations. Unlike conventional DeepONets that rely on generic ``black box'' architectures, VarMION aligns its sub-networks to correspond directly to the algebraic components found in numerical solvers like the Finite Element Method—specifically using a nonlinear branch to represent the inverse stiffness matrix and linear branches to process forcing and boundary flux terms. By effectively ``baking'' the mathematical physics into the network's architecture rather than just its loss function, VarMION demonstrates superior accuracy, robustness, and data efficiency compared to standard baseline models for both linear and nonlinear problems.
+
+\item\href{https://arxiv.org/abs/2411.06587}{\it Variational Physics-informed Neural Operator (VINO) for Solving Partial Differential Equations (Eshaghi et al., 2024)}
+
+\item\cite{alberts2023physics}
+\end{itemize}
+
+\subsection{Framework}
+Let $\Omega\subset\bbR^d$ be a bounded open domain. We consider a parametric PDE on $\Omega$ given by
+\begin{equation}
+\begin{cases}
+    L(a,u)=0, &\text{in}\ \Omega,\\
+    \alpha u+\beta\frac{\partial u}{\partial\mathbf{n}}=g &\text{on}\ \partial\Omega,
+\end{cases}\label{eq:bvp1}
+\end{equation}
+where $a:\Omega\to\bbR^p$ is the parameter function, $g:\partial\Omega\to\bbR$ is given, and $u:\Omega\to\bbR$ is the unknown.
+
+We assume $a\sim\pi$, where $\pi$ is a probability distribution, called the \textit{prior}, on a function space $\mathbb{A}$. Then the PDE \eqref{eq:bvp1} implicitly induces a probability measure $\nu=G^*_\sharp\pi$, which is the pushforward measure of $a\sim\pi$ under the solution operator, so the PDE solution $u\sim\nu$.
+
+A wide classes of PDEs have a \textit{variational distribuion}. In that case, \eqref{eq:bvp1} is equivalent to 
+\begin{equation*}
+    u^*=G^*(a)=\min_{u\in\mathbb{U}} J(a,u),
+\end{equation*}
+where $J:\mathbb{A}\times\mathbb{U}\to\bbR$ is the \textit{energy functional}. Define the \textit{Gibbs measure} over proposed solutions:
+\begin{equation*}
+    P(u|a)=\frac{1}{Z_\beta(a)}e^{-\beta J(a,u)},
+\end{equation*}
+where $\beta>0$ is an inverse temperature, with the normalizing term 
+\begin{equation}
+    Z_\beta(a)=\int_{\mathbb{U}} e^{-\beta J(a,u)}\,\d\mu(u),
+\end{equation}
+where $\mu$ is a reference measure on $\mathbb{U}$. For simplicity we write $H(a,u)=\beta J(a,u)$, and the functional
+$H:\mathbb{A}\times\mathbb{U}\to\bbR$ is called the \textit{Hamiltonian}. As the inverse temperature $\beta\to\infty$, the probability measure $P(u|a)$ concentrates on the exact solution $u^*$ of the PDE \eqref{eq:bvp1}.
+
+\paragraph{Deterministic baseline.} To conduct a ``physics-informed'' operator learning, we choose a neural operator (which is often a universal approximator) $G_\theta:\mathbb{A}\to\mathbb{U}$ and minimize the expected energy:  
+\begin{equation*}
+    \min_\theta \bbE_{a\sim\pi} \left[H(a,G_\theta(a))\right].
+\end{equation*}
+After training, the neural operator $G_\theta$ gives a single solution $u_\theta(a)\in\mathbb{U}$ for each input field $a\in\mathbb{A}$.
+
+\paragraph{A probabilistic variant.} We consider a generative neural operator $T_\theta:\mathbb{A}\times\bbR^q\to\mathbb{U}$ with noise input. For an input field $a\in\mathbb{A}$, the model runs as follows: \vspace{-0.2cm}
+\begin{itemize}[itemsep=-2pt]
+    \item Sample a Gaussian noise $\xi\sim\mathcal{N}(0,\mathbf{I}_q)$,
+    \item Compute $u=T_\theta(a,\xi)$. This induces a conditional distribution
+    \begin{equation*}
+        u\sim Q_\theta(\cdot|a)=T_\theta(a,\cdot)_\sharp\,\mathcal{N}(0,\mathbf{I}_q).
+    \end{equation*}
+\end{itemize}
+In this task, we want this pushforward $Q_\theta(\cdot|a)$ to approximate the Gibbs measure
+\begin{equation*}
+P^*(u|a)\propto e^{-H(a,u)},\quad u\in\mathbb{U}.
+\end{equation*}
+For each $a\in\mathbb{A}$, consider the Kullback-Leibler divergence:
+\begin{equation*}
+\mathrm{KL}\left(Q_\theta(\cdot|a)\,\|\,P^*(\cdot|a)\right)=\bbE_{u\sim Q_\theta(\cdot|a)}\left[\log Q_\theta(u|a)+H(a,u)+\log Z(a)\right],
+\end{equation*}
+where $Z(a)$ is the normalization term. Define the probabilistic operator-learning objective:
+\begin{equation*}
+    \mathcal{L}_{\mathrm{KL}}(\theta)=\bbE_{a\sim\pi}\left[\mathrm{KL}\left(Q_\theta(\cdot|a)\,\|\,P^*(\cdot|a)\right)\right]=\bbE_{a\sim\pi}\left[\bbE_{u\sim Q_\theta(\cdot|a)}\left[\log Q_\theta(u|a)+H(a,u)\right]\right]+\mathrm{Const}.
+\end{equation*}
+This is equivalent to the variational free energy:
+\begin{equation*}
+    \mathcal{L}_{\mathrm{KL}}(\theta)=\bbE_{a\sim\pi}\left[\bbE_{u\sim Q_\theta(\cdot|a)}\left[H(a,u)\right]-\mathcal{S}(Q_\theta(\cdot|a))\right],
+\end{equation*}
+where $\mathcal{S}=-\bbE_{u\sim Q_\theta(\cdot|a)}\left[\log Q_\theta(u|a)\right]$ is the entropy of pushforward $Q_\theta(\cdot|a)$.
+
+\section{Methodology: Amortized Stein Variational Gradient Descent}
+
+\subsection{Problem Formulation}
+We seek to learn a probabilistic mapping from problem parameters $a \in \mathbb{A}$ to solution fields $u \in \mathbb{U}$. We parametrize this mapping using a generative neural operator $T_\theta: \mathbb{A} \times \bbR^q \to \mathbb{U}$ such that $u = T_\theta(a, \xi)$, where $\xi \sim \calN(0, \mathbf{I}_q)$ is latent noise.
+
+Our objective is to ensure the pushforward distribution $Q_\theta(\cdot|a)$ approximates the target Gibbs posterior defined by the physics:
+\begin{equation}
+    P^*(u|a) \propto \exp(-H(a,u)),
+\end{equation}
+where $H(a,u) = \beta J(a,u)$ is the Hamiltonian (scaled energy functional) of the PDE.
+
+Direct minimization of the Kullback-Leibler divergence $\text{KL}(Q_\theta || P^*)$ requires evaluating the entropy term $-\bbE[\log Q_\theta(u|a)]$. For flexible neural operators (e.g., FNO, DeepONet) which are generally non-invertible, the explicit density $Q_\theta$ is intractable. To bypass this, we employ \textbf{Stein Variational Gradient Descent (SVGD)}, which replaces the explicit entropy maximization with a repulsive force in a kernel-based particle optimization framework.
+
+\subsection{Stein Variational Gradient Descent (SVGD)}
+SVGD provides a deterministic transport map to transform a reference distribution into a target distribution $P^*$. Consider a set of particles $\{u^{(i)}\}_{i=1}^M \sim Q_\theta(\cdot|a)$. SVGD updates these particles via a velocity field $\Phi(u)$ that maximally decreases the KL divergence:
+\begin{equation}
+    u^{(i)}_{t+1} \leftarrow u^{(i)}_t + \epsilon \Phi(u^{(i)}_t),
+\end{equation}
+where $\Phi$ is the optimal transport direction in the Reproducing Kernel Hilbert Space (RKHS) associated with a kernel $k(u, u')$. The closed-form solution for $\Phi$ is given by:
+\begin{equation}
+    \Phi(u) = \bbE_{u' \sim Q_\theta}\left[ \underbrace{k(u, u') \nabla_{u'} \log P^*(u'|a)}_{\text{Driving Force}} + \underbrace{\nabla_{u'} k(u, u')}_{\text{Repulsive Force}} \right].
+\end{equation}
+Substituting our physics-based posterior score $\nabla_u \log P^*(u|a) = -\nabla_u H(a, u)$, we obtain:
+\begin{equation}
+    \label{eq:svgd_grad}
+    \Phi(u) = \bbE_{u' \sim Q_\theta}\left[ -k(u, u') \nabla_{u'} H(a, u') + \nabla_{u'} k(u, u') \right].
+\end{equation}
+\textbf{Interpretation:} The first term drives the samples toward low-energy regions (satisfying the PDE), while the second term (kernel gradient) pushes particles away from each other, implicitly maximizing entropy and preventing mode collapse.
+
+\subsection{Amortized Learning for Neural Operators}
+In our setting, we do not optimize finite particles directly. Instead, we optimize the parameters $\theta$ of the generator $T_\theta$ to produce samples that mimic the SVGD dynamics. This is known as \textit{Amortized SVGD}.
+
+By applying the chain rule, the update for parameters $\theta$ is derived by backpropagating the Stein gradient $\Phi$ through the generator network:
+\begin{equation}
+    \frac{\partial \calL}{\partial \theta} \approx -\bbE_{a \sim \pi} \bbE_{\xi \sim \calN} \left[ \left( \nabla_\theta T_\theta(a, \xi) \right)^T \Phi(T_\theta(a, \xi)) \right].
+\end{equation}
+Here, $\nabla_\theta T_\theta$ is the Jacobian of the neural operator with respect to its weights. Intuitively, this update adjusts the weights so that the generated fields move in the direction $\Phi$ dictated by the physics and the repulsive diversity term. The training procedure for the probabilistic physics-informed operator is summarized in Algorithm \ref{alg:svgd}.
+
+\begin{algorithm}
+\caption{Physics-Informed Amortized SVGD}
+\label{alg:svgd}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Prior $\pi$ on parameters $a$, Hamiltonian $H(a,u)$, Kernel $k(\cdot, \cdot)$.
+\State \textbf{Initialize:} Neural Operator parameters $\theta$.
+\While{not converged}
+    \State Sample batch of PDE parameters $\{a_b\}_{b=1}^B \sim \pi$.
+    \State Sample noise batch $\{\xi_{b,i}\}_{i=1}^M \sim \calN(0, \mathbf{I})$ for each $a_b$.
+    \State Generate candidates: $u_{b,i} = T_\theta(a_b, \xi_{b,i})$.
+    \State Compute Physics Gradients: $g_{b,i} = -\nabla_u H(a_b, u_{b,i})$.
+    \State Compute Stein Force $\Phi(u_{b,i})$ using Eq. \eqref{eq:svgd_grad} via Monte Carlo estimate over $M$ particles.
+    \State Backpropagate: $\Delta \theta \propto \sum_{b,i} \nabla_\theta T_\theta(a_b, \xi_{b,i}) \cdot \Phi(u_{b,i})$.
+    \State Update $\theta$ using Adam optimizer.
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+\section{Alternative Approaches}
+\label{sec:alternative_methods}
+
+While amortized SVGD provides a principled kernel-based variational framework for approximating the physics-induced Gibbs posterior, it is not the only viable approach for probabilistic operator learning with an implicit generator. In this section, we outline several alternative energy-based methods that avoid explicit density evaluation and offer complementary trade-offs in terms of computational efficiency, scalability, and approximation fidelity. All methods leverage the known Hamiltonian $H(a,u)$ and the ability to compute its functional gradient with respect to the solution field $u$.
+
+\subsection{Contrastive Divergence and Amortized CD for PDE Energies}
+
+Contrastive Divergence (CD) is a classical technique for training energy-based models by approximating likelihood gradients using short Markov chains. In our setting, the energy $H(a,u)$ is fixed by the PDE physics, and the learning objective shifts from estimating an energy function to learning an \emph{amortized sampler} that produces samples from the Gibbs distribution
+\begin{equation}
+    P^*(u|a) \propto \exp(-H(a,u)).
+\end{equation}
+
+Given an initial sample $u_0 = T_\theta(a,\xi)$ with $\xi \sim \calN(0,\mathbf{I})$, we perform $K$ steps of Langevin dynamics targeting $P^*(u|a)$:
+\begin{equation}
+    u_{k+1} = u_k - \eta \nabla_u H(a, u_k) + \sqrt{2\eta}\,\epsilon_k,
+    \quad \epsilon_k \sim \calN(0,\mathbf{I}),
+\end{equation}
+yielding a refined sample $u_K$ that is closer to the target distribution. The neural operator is then trained to match the refined sample via an amortized CD objective:
+\begin{equation}
+    \calL_{\text{CD}}(\theta)
+    =
+    \bbE_{a \sim \pi}\bbE_{\xi \sim \calN}
+    \left[
+        \|T_\theta(a,\xi) - \text{stopgrad}(u_K)\|^2
+    \right].
+\end{equation}
+
+\paragraph{Interpretation.}
+This procedure can be viewed as amortized MCMC, where the neural operator learns to directly generate samples that would otherwise require iterative physics-based refinement. Unlike SVGD, which enforces diversity through kernel repulsion, CD relies on stochasticity in the Langevin dynamics to explore the energy landscape. This approach is particularly effective when $H(a,u)$ provides a reliable local descent direction but global distributional accuracy is less critical.
+
+\subsection{Fisher Divergence and Score Matching}
+
+An alternative to KL-based variational objectives is to match distributions via their \emph{score functions}. The Fisher divergence between a variational distribution $Q_\theta(u|a)$ and the target Gibbs distribution $P^*(u|a)$ is defined as
+\begin{equation}
+    D_F(Q_\theta \| P^*)
+    =
+    \frac{1}{2}
+    \bbE_{u \sim Q_\theta(\cdot|a)}
+    \left[
+        \|\nabla_u \log Q_\theta(u|a) - \nabla_u \log P^*(u|a)\|^2
+    \right].
+\end{equation}
+
+Since $\nabla_u \log P^*(u|a) = -\nabla_u H(a,u)$ is known analytically, the primary challenge lies in approximating the score $\nabla_u \log Q_\theta(u|a)$ of the implicit generator. To this end, we introduce an auxiliary score network $s_\psi(a,u)$ and train it via denoising score matching (DSM). Specifically, for perturbed samples $\tilde u = u + \sigma \epsilon$, $\epsilon \sim \calN(0,\mathbf{I})$, the DSM objective is
+\begin{equation}
+\calL_{\text{DSM}}(\psi)=\bbE_{a,u,\epsilon}
+    \left[\left\|s_\psi(a,\tilde u) + \frac{1}{\sigma}\epsilon\right\|^2\right].
+\end{equation}
+With a consistent score estimator in place, the Fisher divergence objective becomes
+\begin{equation}
+    \calL_{\text{Fisher}}(\theta,\psi)
+    =
+    \bbE_{a \sim \pi}\bbE_{u \sim Q_\theta(\cdot|a)}
+    \left[
+        \|s_\psi(a,u) + \nabla_u H(a,u)\|^2
+    \right].
+\end{equation}
+
+\paragraph{Interpretation.}
+Fisher divergence minimization aligns the local geometry of the learned distribution with that of the physics-induced Gibbs measure. Unlike SVGD, which relies on particle interactions, score matching enforces consistency at the level of infinitesimal perturbations, making it particularly attractive for high-dimensional function spaces where kernel methods become expensive.
+
+\subsection{Sliced Score Matching}
+For PDE discretizations with large state dimension, direct score matching may be computationally prohibitive. Sliced score matching offers a scalable alternative by projecting score discrepancies onto random one-dimensional subspaces. Let $v \sim \calN(0,\mathbf{I})$ be a random probe direction. The sliced Fisher objective is given by
+\begin{equation}
+    \calL_{\text{sliced}}(\theta,\psi)
+    =
+    \bbE_{a,u,v}
+    \left[
+        \left(
+            v^\top \big( s_\psi(a,u) + \nabla_u H(a,u) \big)
+        \right)^2
+    \right].
+\end{equation}
+
+In practice, this objective can be efficiently estimated using Hutchinson-style random projections, making it well-suited for large-scale operator learning problems.
+
+\paragraph{Interpretation.}
+Sliced score matching preserves the core principle of Fisher divergence minimization while significantly reducing computational cost. From a functional perspective, it enforces alignment between the projected gradients of the learned and target distributions, which is often sufficient to capture the dominant physics-constrained directions in solution space.
+
+\paragraph{Summary.}
+Contrastive divergence, Fisher divergence, and (sliced) score matching provide complementary alternatives to SVGD for probabilistic operator learning. All three methods exploit the availability of a known Hamiltonian $H(a,u)$ and avoid explicit density evaluation for the implicit generator $T_\theta$. Among them, amortized CD emphasizes efficient sampling, score matching emphasizes local distributional geometry, and sliced variants prioritize scalability in high-dimensional PDE settings.
+
+\subsection{Preconditioned Langevin Dynamics for Mesh-Independent Sampling}
+
+A critical challenge in applying standard Langevin dynamics to discretized PDEs is the irregularity of standard Gaussian noise. On a spatial grid, white noise $\xi \sim \mathcal{N}(0, \mathbf{I})$ corresponds to a flat power spectrum, which becomes increasingly ``rough'' (non-differentiable) as the grid resolution increases. This contradicts the physical prior of PDE solutions, which typically reside in Sobolev spaces (e.g., $H^1$ or $H^2$) and possess inherent smoothness. Furthermore, the mismatch between the ``stiff'' energy gradients (dominated by the Laplacian) and the isotropic noise leads to slow, mesh-dependent convergence.
+
+To address this challenge, we propose using \textit{Preconditioned Langevin Dynamics} (pLD), also known as Riemann Manifold Langevin dynamics. Instead of isotropic Euclidean noise, we align the noise geometry with the natural function space of the PDE.
+
+Let $M$ be a symmetric, positive-definite preconditioner that approximates the dominant elliptic operator of the system. The preconditioned update rule is given by:
+\begin{equation}
+    u_{k+1} = u_{k} - \eta M \nabla_u H(a, u_k) + \sqrt{2\eta} M^{1/2} \xi_k, \quad \xi_k \sim \mathcal{N}(0, \mathbf{I}).
+\end{equation}
+Here, the noise term $\tilde{\xi} = M^{1/2} \xi_k$ is effectively drawn from a Gaussian Process with covariance $\Sigma = M$. When $M^{-1}$ is the discretized Laplacian, $\Sigma$ corresponds to the Green's function of the domain, ensuring that the injected noise intrinsically satisfies the boundary conditions and possesses the same $H^1$ regularity as the physical solution.
+
+\paragraph{Choice of preconditioner.}
+A natural and widely used choice for \(M\) in function-space sampling is an inverse elliptic operator of the form
+\begin{equation}
+    \label{eq:precond_operator}
+    M = (\kappa^2 I - \Delta)^{-\alpha},
+\end{equation}
+where \(\kappa > 0\) controls the correlation length and \(\alpha > 0\) determines the degree of smoothing. This family corresponds to Matérn-type covariance operators and induces spatially correlated (colored) noise with controlled regularity. In one spatial dimension, sample paths generated by \eqref{eq:precond_operator} are mean-square differentiable for sufficiently large \(\alpha\).
+
+\paragraph{Boundary conditions.}
+To enforce homogeneous Dirichlet boundary conditions, the preconditioner \(M\) is defined on the subspace of functions vanishing on \(\partial\Omega\). In practice, this can be achieved by representing solution fields in a sine basis, in which case both the Laplacian and the operator \(M\) are diagonal. Let
+\[
+u(x) = \sum_{m \ge 1} c_m \sin(m \pi x),
+\]
+then the preconditioner acts on Fourier coefficients as
+\[
+\lambda_m(M) = (\kappa^2 + (m\pi)^2)^{-\alpha}.
+\]
+Sampling \(M^{1/2}\epsilon\) thus reduces to sampling independent Gaussian coefficients with variance \(\lambda_m(M)\).
+
+
+\paragraph{Integration with amortized contrastive divergence.}
+In the amortized CD framework, the refined sample \(u_K\) used as a training target is obtained by applying a small number of preconditioned Langevin steps starting from the generator output \(u_0 = T_\theta(a,\xi)\). The resulting dynamics preferentially explore smooth, low-energy directions while suppressing spurious high-frequency fluctuations. This significantly stabilizes training and aligns the refinement process with the regularity properties of PDE solutions.
+
+\paragraph{Interpretation.}
+Preconditioned Langevin dynamics can be viewed as performing gradient-based refinement in a Sobolev-type geometry rather than the ambient Euclidean geometry of grid values. This choice introduces a controlled inductive bias toward smooth solutions while preserving the correct physics-induced Gibbs distribution.
+
+
+\section{Experiments on ODEs}
+\subsection{Poisson's Equation}
+We consider the boundary value problem
+\begin{equation*}
+\begin{cases}
+    \displaystyle\frac{d}{dx}\left(a(x)\frac{du}{dx}(x)\right)=f(x)\quad\text{in}\ (0,1),\vspace{0.1cm}\\
+    u(0)=u(1)=0,
+\end{cases}
+\end{equation*}
+where $u\in H_0^1([0,1])$ is the unknown, $a\in L^\infty(0,1)\cap C^1([0,1])$ is a nonnegative coefficient, and $f\in L^\infty(0,1)\cap C([0,1])$ is the forcing. The energy function of this ODE is
+\begin{equation*}
+J(u;a,f)=\frac{1}{2}\int_0^1 a(x)\left\vert u^\prime(x)\right\vert^2\,dx-\int_0^1 f(x)u(x)\,dx
+\end{equation*}
+\paragraph{Discretization and boundary constraints.} We fix the boundary values $u(0)=u(1)=0$, and evaluate the pertinent functions on interior grid points $x_1,\cdots,x_n\in(0,1)$. To model a solution $u$, define the full grid solution by fixing endpoints:
+\begin{itemize}[itemsep=-2pt]
+    \item set $u_0=u_{n+1}=0$ always, and
+    \item store only interior unknowns $u_{\text{int}}=(u_1,\cdots,u_n)\in\bbR^n$.
+    \item when evaluating the energy $H$, use the padded vector $u=(u_0,u_1,\cdots,u_n,u_{n+1})$.
+\end{itemize}
+Let $x_j=jh$, $j=1,\cdots,n$, where $h=\frac{1}{n+1}$. In discretized form, the energy function is
+\begin{equation*}
+J(u;a,f)=\frac{1}{2}hu^\top K(a) u-hf^\top u,
+\end{equation*}
+where $K(a)$ is a kernel matrix that couples neighboring grid values. Then
+\begin{equation*}
+    \nabla_u H(u;a,f)=\beta\nabla_u J(u;a,f)=\beta h\left(K(a)u-f\right).
+\end{equation*}
+A finite difference form of $K(a)$ is given by the tridiagonal matrix:
+\begin{itemize}[itemsep=-2pt]
+    \item $K_{ii}=\bigl(a_{i+\frac{1}{2}}+a_{i-\frac{1}{2}}\bigr)/h^2$,\quad $K_{i,i+1}=-a_{i+\frac{1}{2}}/h^2$, and $K_{i,i-1}=-a_{i-\frac{1}{2}}/h^2$.
+    \item Each $a_{i,i+\frac{1}{2}}$ is the value of $a(x)$ evaluated at the midpoint. It is common to use the linear interpolation $a_{i+\frac{1}{2}}=(a_i+a_{i+1})/2$ when $a$ is only given on grids, or the harmonic mean $$a_{i+\frac{1}{2}}=\frac{2}{a_i^{-1}+a_{i+1}^{-1}}$$
+    for discontinuous $a$.
+\end{itemize}
+In particular, for $a\equiv 1$ in the standard Poisson's equation,
+\begin{equation}
+    K=\frac{1}{h^2}\begin{pmatrix}
+        2 & -1 & 0 & \cdots & 0 \\
+        -1 & 2 & -1 & \ddots & \vdots\\
+        0 & \ddots & \ddots & \ddots & 0 \\
+        \vdots & \ddots & -1 & 2 & -1\\
+        0 & \cdots & 0 & -1 & 2
+    \end{pmatrix}_{n\times n}.\label{eq:diffkernel}
+\end{equation}
+
+\subsection{Nonlinear Poisson's Equation}
+Consider the non-linear Poisson's equation with Dirichlet BC:
+\begin{equation*}
+\begin{cases}
+-u''(x) = f(u(x))+ s(x) &\text{in}\ (0,1),\\
+u(0)=u(1)=0.
+\end{cases}
+\end{equation*}
+The energy functional of this BVP is
+\begin{equation*}
+    J(u,s)=\int_0^1\left(\frac{1}{2}\vert u^\prime(x)\vert^2+V(u(x))-s(x)u(x)\right) dx,
+\end{equation*}
+where the function $V:[0,1]\to\bbR$ satisfies $V^\prime(u)=f(u)$. The discretized approximation is
+\begin{equation*}
+    J(u,s)=\frac{1}{2}hu^\top Ku+h\mathbf{1}^\top V(u)-hs^\top u,
+\end{equation*}
+where $K$ is the kernel matrix \eqref{eq:diffkernel}. The energy gradient is
+\begin{equation*}
+    \nabla_u H(u,s)=\beta\nabla_u J(u,s)=\beta h\left(Ku+\mathbf{1}^\top f(u)-s\right).
+\end{equation*}
+
+A famous model for phase transitions (e.g., separating oil and water, or magnetic domains) is the Double-Well Potential (Ginzburg-Landau) ODE:
+\begin{equation*}
+\begin{cases}
+-u^{\prime\prime}(x) + (u(x)^3 - u(x)) = s(x) &\text{in}\ (0,1),\\
+u(0)=u(1)=0.
+\end{cases}
+\end{equation*}
+Here, the reaction term is $f(u) = u-u^3$. The energy functional of this ODE is
+$$J(u,s) = \int_0^1 \biggl( \frac{1}{2} (u')^2 + \underbrace{\left(\frac{1}{4}u^4 - \frac{1}{2}u^2\right)}_{\text{Double-Well}} - su \biggr) dx.$$
+
+\subsection{2D Darcy Flow}
+We consider the following boundary problem boundary value problem with Dirichlet boundary condition:
+\begin{equation*}
+\begin{cases}
+    \nabla\cdot\left(a(x)\nabla(x)\right)=f(x) &\text{in}\ \Omega=(0,1)^2,\vspace{0.1cm}\\
+    u=0 &\text{on}\ \partial\Omega,
+\end{cases}
+\end{equation*}
+where $u\in H_0^1(\Omega)$ is the unknown, $a\in L^\infty(\Omega)\cap C^1(\Omega)$ is a nonnegative coefficient, and $f\in L^\infty(\Omega)\cap C(\Omega)$ is the forcing. The energy function of this ODE is
+\begin{equation*}
+J(u;a,f)=\frac{1}{2}\int_\Omega a(x)\left\vert\nabla u(x)\right\vert^2\,dx-\int_\Omega f(x)u(x)\,dx.
+\end{equation*}
+For discretization, we let $u\in\bbR^{N\times N}$ be values on interior grid points, with $h=1/(N+1)$, and impose $u=0$ on the boundary by padding. We use the approximation for partial derivatives
+\begin{equation*}
+(u_x)_{i+\frac{1}{2},j}=\frac{u_{i+1,j}-u_{i,j}}{h},\quad (u_x)_{i,j+\frac{1}{2}}=\frac{u_{i,j+1}-u_{i,j}}{h},
+\end{equation*}
+and permeabilities
+\begin{equation*}
+    a_{i+\frac{1}{2},j}=\mathrm{avg}(a_{i,j},a_{i+1,j}),\quad a_{i,j+\frac{1}{2}}=\mathrm{avg}(a_{i,j},a_{i,j+1}),
+\end{equation*}
+where $\mathrm{avg}(\cdot,\cdot)$ can be arithmetic mean (for smooth $a$) or harmonic mean (for strongly varing $a$). Then the discretized energy takes the form
+\begin{equation*}
+    J(u;a,f)=\frac{h^2}{2}\sum_{i,j}\left(a_{i+\frac{1}{2},j}(u_x)_{i+\frac{1}{2},j}^2+a_{i,j+\frac{1}{2}}(u_x)_{i,j+\frac{1}{2}}^2\right)-h^2\sum_{i,j}u_{i,j}f_{i,j}.
+\end{equation*}
+To compute the physical score
+\begin{equation*}
+    \nabla_u H(u;a,f)=\beta\nabla_u J(u;a,f),
+\end{equation*}
+one can depend on either autograd (recommended) or write it explicitly via divergence of fluxes.
+
+\paragraph{Improvement steps in contrastive divergence.} Use preconditioned Langevin
+\begin{equation*}
+    u_{k+1}=u_k-\eta M\nabla_u H(u_k)+\sqrt{2\eta}M^{1/2}\xi_k,\quad\xi_k\sim\mathcal{N}(0,\mathbf{I}).
+\end{equation*}
+Here we take $M=(\kappa^2I-\Delta)^{-\alpha}$.
+
+\subsection{1D Viscous Burgers Equation}
+\label{sec:burgers}
+
+We next consider the one-dimensional viscous Burgers equation as a prototype nonlinear, time-dependent PDE:
+\begin{equation}
+    u_t + u\,u_x = \nu u_{xx},
+    \qquad x \in (0,1),\ t \in (0,T),
+    \label{eq:burgers_pde}
+\end{equation}
+where \(\nu > 0\) denotes the viscosity coefficient. Burgers equation serves as a canonical benchmark for nonlinear transport with diffusion and is widely used to evaluate operator-learning methods.
+\paragraph{Problem setup.} We focus on a time-marching formulation in which the initial condition
+\(
+u^n(x) = u(x, t_n)
+\)
+is treated as the input parameter, and the goal is to predict the solution at the next time step \(u^{n+1}(x) = u(x, t_{n+1})\), with \(t_{n+1} = t_n + \Delta t\).
+Periodic boundary conditions are imposed for simplicity and numerical stability.
+
+This formulation allows us to define a probabilistic one-step solution operator
+\[
+u^{n+1} \sim Q_\theta(\cdot \mid u^n),
+\qquad
+u^{n+1} = T_\theta(u^n, \xi),
+\quad \xi \sim \mathcal{N}(0, I),
+\]
+where \(T_\theta\) is a generative neural operator.
+
+\paragraph{Discrete residual energy,}
+Unlike elliptic problems, Burgers equation does not arise as the minimizer of a purely spatial energy functional. Instead, we adopt a physics-informed residual energy corresponding to an implicit time discretization. Using a backward Euler scheme, the discrete PDE residual is
+\begin{equation}
+    \mathcal{R}(u^{n+1}; u^n)
+    =
+    \frac{u^{n+1} - u^n}{\Delta t}
+    +
+    u^{n+1} \odot \partial_x u^{n+1}
+    -
+    \nu \partial_{xx} u^{n+1},
+    \label{eq:burgers_residual}
+\end{equation}
+where \(\odot\) denotes pointwise multiplication. We define the energy functional
+\begin{equation}
+    H(u^n, u^{n+1})
+    =
+    \frac{1}{2}
+    \big\|
+        \mathcal{R}(u^{n+1}; u^n)
+    \big\|_2^2,
+    \label{eq:burgers_energy}
+\end{equation}
+which induces a Gibbs distribution
+\(
+P^*(u^{n+1} \mid u^n) \propto \exp(-H(u^n, u^{n+1}))
+\)
+over the next-step solution.
+
+\subsubsection{Contrastive Divergence Refinement}
+
+Given an initial sample \(u_0^{n+1} = T_\theta(u^n, \xi)\), we apply one or more steps of Langevin dynamics to refine the solution:
+\begin{equation}
+    u_{k+1}^{n+1}
+    =
+    u_k^{n+1}
+    -
+    \eta \nabla_{u^{n+1}} H(u^n, u_k^{n+1})
+    +
+    \sqrt{2\eta}\,\epsilon_k,
+    \qquad \epsilon_k \sim \mathcal{N}(0,I),
+\end{equation}
+and train the neural operator using an amortized contrastive divergence objective:
+\begin{equation}
+    \mathcal{L}_{\mathrm{CD}}(\theta)
+    =
+    \mathbb{E}
+    \left[
+        \big\|
+            T_\theta(u^n,\xi)
+            -
+            \mathrm{stopgrad}(u_K^{n+1})
+        \big\|^2
+    \right].
+\end{equation}
+
+\subsubsection{Computational Cost of Spatial Derivatives}
+
+A potential concern in the Burgers setting is the computational cost associated with evaluating the second-order derivative \(u_{xx}\). In practice, this cost is negligible compared to the cost of a neural operator forward pass.
+
+On a uniform grid with spacing \(h\), the first and second derivatives are approximated using standard finite-difference stencils:
+\begin{align}
+    (\partial_x u)_i
+    &\approx \frac{u_{i+1} - u_{i-1}}{2h}, \\
+    (\partial_{xx} u)_i
+    &\approx \frac{u_{i+1} - 2u_i + u_{i-1}}{h^2}.
+\end{align}
+These operations require only a constant number of vector shifts and elementwise operations and scale linearly with the grid size \(N\). For periodic boundary conditions, they are implemented via circular shifts without any additional overhead.
+
+Importantly, during contrastive divergence training, gradients are not backpropagated through the Langevin refinement steps. As a result, the computation of \(\partial_x u\) and \(\partial_{xx} u\) is required only for evaluating \(\nabla_{u^{n+1}} H\), without incurring higher-order derivatives. Consequently, the overall computational cost of the physics-based refinement is dominated by the neural operator evaluation rather than the PDE residual computation.
+
+\paragraph{Remark.}
+In higher-dimensional or stiffer regimes (e.g., small viscosity \(\nu\)), stability rather than computational cost becomes the primary concern. This can be addressed through smaller Langevin step sizes, preconditioned Langevin dynamics, or smooth noise injection, without altering the underlying formulation.
+
+
+\section{Young Measures: A Brief Review}
+Many nonlinear partial differential equations (PDEs) and variational problems admit solution sequences that are bounded but fail to converge strongly. In such cases, weak limits may exist while nonlinear quantities---such as energies or fluxes---do not pass to the limit in a classical sense. This phenomenon is ubiquitous in the calculus of variations (e.g., microstructure in nonconvex energies) and in nonlinear PDEs (e.g., oscillatory or measure-valued solutions).
+
+Probabilistic neural PDE solvers, which represent solutions as random fields rather than deterministic functions, naturally encounter a similar mathematical structure: instead of predicting a single function $u(x)$, the model induces a family of probability measures over solution values (and gradients) indexed by space. In this section, we briefly review Young measures and explain how they provide a principled mathematical framework for interpreting and designing probabilistic neural PDE solvers.
+
+Let $\Omega \subset \mathbb{R}^d$ be an open set and consider a sequence of functions $u_n : \Omega \to \mathbb{R}^m$ that is bounded in $L^p(\Omega)$ for some $1 \le p < \infty$. Although $u_n$ may converge weakly, nonlinear compositions $f(u_n)$ typically do not.
+
+\subsection{Definition}
+A (classical) Young measure on $\Omega$ with values in $\mathbb{R}^m$ is a family of probability measures $\{\nu_x\}_{x \in \Omega}$ such that:
+\begin{itemize}[itemsep=-2pt]
+\item for almost every $x \in \Omega$, $\nu_x$ is a probability measure on $\mathbb{R}^m$;
+\item for every bounded continuous function $f : \mathbb{R}^m \to \mathbb{R}$, the map
+\[
+x \mapsto \int_{\mathbb{R}^m} f(\xi) \, d\nu_x(\xi)
+\]
+is measurable.
+\end{itemize}
+Intuitively, $\nu_x$ describes the local distribution of values generated by fine-scale oscillations of the sequence $u_n$ near the point $x$.
+
+\subsection{Fundamental Theorem}
+If $(u_n)$ is bounded in $L^p(\Omega;\mathbb{R}^m)$, then there exists a subsequence (not relabeled) and a Young measure $\nu_x$ such that, for every $f \in C_b(\mathbb{R}^m)$,
+\[
+f(u_n) \rightharpoonup \int f(\xi)\,d\nu_x(\xi)
+\quad \text{weakly in } L^1(\Omega).
+\]
+If $u_n \to u$ strongly, then $\nu_x = \delta_{u(x)}$ almost everywhere; otherwise, $\nu_x$ captures the residual oscillatory behavior lost under weak convergence.
+
+\subsection{Young Measures in the Calculus of Variations}
+Consider an energy functional of the form
+\[
+E(u) = \int_\Omega f(x,u(x),\nabla u(x)),dx.
+\]
+For nonconvex $f$, minimizing sequences $(u_n)$ may fail to converge strongly, while $\nabla u_n$ develops oscillations. Young measures provide a representation of the relaxed limit:
+\[
+E(u_n) \to \int_\Omega \int f(x,u(x),\xi),d\nu_x(\xi),dx,
+\]
+where $\nu_x$ is (in the gradient case) a gradient Young measure generated by $(\nabla u_n)$. This representation underlies relaxation theory and explains the emergence of microstructure in variational problems.
+
+\section{Probabilistic Neural PDE Solvers as Parametrized Young Measures}
+
+\subsection{Random-Field Representation}
+We consider a probabilistic neural PDE solver that represents the solution as a random field
+\[
+u_\theta : \Omega \times \mathcal{Z} \to \mathbb{R}^m, \qquad u_\theta(x,z),
+\]
+where $z \sim p(z)$ is a latent variable (e.g., standard Gaussian) and $\theta$ denotes model parameters. For each $x$, the model induces a probability measure
+\[
+\mu_x^\theta := \mathrm{Law}(u_\theta(x,Z)).
+\]
+Similarly, by differentiation,
+\[
+\nu_x^\theta := \mathrm{Law}(\nabla u_\theta(x,Z)).
+\]
+This construction yields a family of measures indexed by space, directly analogous to a Young measure.
+
+\subsection{Nonlinear PDEs and Weak Residuals}
+Let $\mathcal{R}(u,\nabla u;x)=0$ denote a nonlinear PDE operator. In the presence of oscillations, enforcing the PDE pointwise may be ill-posed. Instead, we consider weak or averaged constraints:
+\[
+\mathbb{E}_Z[\mathcal{R}(u_\theta(x,Z),\nabla u_\theta(x,Z);x)] = \int \mathcal{R}(\xi,\eta;x), d\mu_x^\theta(\xi,\eta).
+\]
+This is precisely the Young-measure pairing of the nonlinear operator with the induced measure. Training the model to satisfy such constraints corresponds to enforcing the PDE at the level of Young measures.
+
+\subsection{Energy-Based Training and Relaxation}
+If the PDE arises as the Euler--Lagrange equation of an energy $E(u)$, then minimizing the expected energy
+\[
+\min_\theta\; \mathbb{E}_Z[E(u_\theta(\cdot,Z))]
+\]
+can be interpreted as solving a relaxed variational problem. Non-Dirac measures $\mu_x^\theta$ correspond to measure-valued (Young-measure) minimizers, providing a principled explanation for multimodal or stochastic outputs of the solver.
+
+\section{Implications for Model Design}
+\paragraph{Theoretical Claim.} We interpret the generative neural operator $T_\theta(a, \xi)$ as a sampler for the Young measure of the Euler-Lagrange system. Specifically, for a fixed input parameter $a$, the pushforward distribution induced by the stochastic input $\xi$:$$\mu_x := (T_\theta(a, \cdot)(x))_\# \mathcal{N}(0, I)$$approximates the Young measure $\nu_x$ associated with the generalized solution. By training the operator to minimize the expected Hamiltonian (variational energy), the model learns to generate samples supported on the energy wells of $W$, thereby capturing the physical microstructure and phase coexistence that deterministic solvers ignore.
+
+
+The Young-measure perspective suggests several design principles:
+\begin{itemize}
+\item \textbf{Model random fields, not pointwise marginals.} Parameterizing $u_\theta(x,z)$ ensures compatibility between values and gradients, analogous to gradient Young measures.
+\item \textbf{Train against nonlinear expectations.} Losses should involve expectations of nonlinear PDE residuals or energies, rather than relying solely on mean predictions.
+\item \textbf{Interpret stochasticity structurally.} Nontrivial output distributions may reflect genuine variational relaxation or microstructure, rather than mere epistemic uncertainty.
+\end{itemize}
+
+Viewed through this lens, probabilistic neural PDE solvers can be understood as learning parametrized Young measures that approximate the correct measure-valued solutions of nonlinear PDEs and variational problems.
+
+
+
+
+
+%%%%%%%%%%%%-- reference --%%%%%%%%%%%
+\newpage
+\bibliographystyle{ims}
+\bibliography{reference}
+
+%%%%%%%%%%%% -- appendix -- %%%%%%%%%%%
+
+\end{document}

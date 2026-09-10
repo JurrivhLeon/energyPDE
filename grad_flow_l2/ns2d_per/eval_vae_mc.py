@@ -37,7 +37,7 @@ except ImportError:
         build_navier_stokes2d_periodic_step_dataset,
         build_navier_stokes2d_periodic_trajectory_dataset_from_split,
     )
-    from grad_flow_l2.ns2d_per.train_vae import (
+    from grad_flow_l2.ns2d_per.train_vae_mc import (
         PeriodicLatentVAETrainer2D,
         _build_model,
         _unpack_traj_batch,
@@ -54,7 +54,9 @@ def _torch_load_checkpoint(checkpoint_path: str, map_location):
         msg = str(exc)
         if "weights_only=True" not in msg or "legacy .tar format" not in msg:
             raise
-        return torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
 
 
 def set_seed(seed: int, seed_cuda: bool = False) -> None:
@@ -72,13 +74,24 @@ def seed_worker(worker_id: int) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate periodic 2D Navier-Stokes latent VAE checkpoint")
+    parser = argparse.ArgumentParser(
+        description="Evaluate periodic 2D Navier-Stokes latent VAE checkpoint"
+    )
     parser.add_argument("--dataset-path", type=str, required=True)
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to best_model.pt or final_model.pt")
-    parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to best_model.pt or final_model.pt",
+    )
+    parser.add_argument(
+        "--split", type=str, default="test", choices=["train", "val", "test"]
+    )
     parser.add_argument("--n-plot-samples", type=int, default=20)
     parser.add_argument("--snapshot-times", type=str, default="4,8,12,16,20")
-    parser.add_argument("--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs_vae/eval")
+    parser.add_argument(
+        "--output-dir", type=str, default="grad_flow_l2/ns2d_per/outputs_vae/eval"
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
@@ -147,19 +160,97 @@ def _parse_snapshot_times(raw: str, t_start: float, t_end: float) -> List[float]
     return vals
 
 
-
-
 def _spectral_h1_norm_2d(u: torch.Tensor) -> torch.Tensor:
     n_x = int(u.shape[-2])
     n_y = int(u.shape[-1])
     u_hat = torch.fft.fft2(u, dim=(-2, -1), norm="ortho")
     real_dtype = u.real.dtype
-    kx = 2.0 * torch.pi * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u.device).to(dtype=real_dtype)
-    ky = 2.0 * torch.pi * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u.device).to(dtype=real_dtype)
+    kx = (
+        2.0
+        * torch.pi
+        * torch.fft.fftfreq(n_x, d=1.0 / float(n_x), device=u.device).to(
+            dtype=real_dtype
+        )
+    )
+    ky = (
+        2.0
+        * torch.pi
+        * torch.fft.fftfreq(n_y, d=1.0 / float(n_y), device=u.device).to(
+            dtype=real_dtype
+        )
+    )
     kx_grid, ky_grid = torch.meshgrid(kx, ky, indexing="ij")
     weight = 1.0 + kx_grid.square() + ky_grid.square()
     power = u_hat.real.square() + u_hat.imag.square()
     return torch.sqrt(torch.sum(power * weight, dim=(-2, -1)))
+
+
+def _rollout_window_metrics(
+    num_all: torch.Tensor,
+    den_all: torch.Tensor,
+    h1_num_all: torch.Tensor,
+    h1_den_all: torch.Tensor,
+    rel: torch.Tensor,
+    rel_h1: torch.Tensor,
+    n_steps: int,
+    prefix: str,
+) -> Dict[str, object]:
+    n_available = int(num_all.shape[1])
+    n_window = max(1, min(int(n_steps), n_available))
+    num_w = num_all[:, :n_window]
+    den_w = den_all[:, :n_window]
+    h1_num_w = h1_num_all[:, :n_window]
+    h1_den_w = h1_den_all[:, :n_window]
+    rel_w = rel[:, :n_window]
+    rel_h1_w = rel_h1[:, :n_window]
+
+    l2_samples = (
+        (
+            torch.sqrt(torch.sum(num_w.square(), dim=1))
+            / (torch.sqrt(torch.sum(den_w.square(), dim=1)) + 1e-8)
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
+    h1_samples = (
+        (
+            torch.sqrt(torch.sum(h1_num_w.square(), dim=1))
+            / (torch.sqrt(torch.sum(h1_den_w.square(), dim=1)) + 1e-12)
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
+    rel_w_cpu = rel_w.detach().cpu()
+    rel_h1_w_cpu = rel_h1_w.detach().cpu()
+
+    return {
+        f"{prefix}_steps": int(n_window),
+        f"{prefix}_rollout_rel_l2": float(np.nanmean(l2_samples)),
+        f"{prefix}_rollout_rel_l2_median": float(np.nanmedian(l2_samples)),
+        f"{prefix}_rollout_rel_l2_std": float(np.nanstd(l2_samples)),
+        f"{prefix}_rollout_rel_h1": float(np.nanmean(h1_samples)),
+        f"{prefix}_rollout_rel_h1_median": float(np.nanmedian(h1_samples)),
+        f"{prefix}_rollout_rel_h1_std": float(np.nanstd(h1_samples)),
+        f"{prefix}_rel_curve_mean": torch.nanmean(rel_w_cpu, dim=0)
+        .numpy()
+        .astype(np.float64),
+        f"{prefix}_rel_h1_curve_mean": torch.nanmean(rel_h1_w_cpu, dim=0)
+        .numpy()
+        .astype(np.float64),
+        f"{prefix}_overall_rel_l2_samples": l2_samples,
+        f"{prefix}_overall_rel_h1_samples": h1_samples,
+    }
+
+
+def _infer_training_horizon_steps(train_args: Namespace, n_steps: int) -> int:
+    train_steps = getattr(train_args, "train_steps_used", None)
+    if train_steps is None:
+        return int(n_steps)
+    return max(1, min(int(train_steps), int(n_steps)))
 
 
 @torch.no_grad()
@@ -172,6 +263,7 @@ def _evaluate_rollout_curves(
     delta_clip: float = 0.0,
     state_clip: float = 0.0,
     rollout_mode: str = "latent",
+    training_horizon_steps: int | None = None,
 ) -> Dict[str, np.ndarray]:
     num_batches = []
     den_batches = []
@@ -226,14 +318,43 @@ def _evaluate_rollout_curves(
     h1_den_all = torch.cat(h1_den_batches, dim=0)[:, 1:]
     rel = num_all / (den_all + 1e-8)
     rel_h1 = h1_num_all / (h1_den_all + 1e-12)
-    overall_rel_l2_samples = (torch.sqrt(torch.sum(num_all.square(), dim=1)) / (torch.sqrt(torch.sum(den_all.square(), dim=1)) + 1e-8)).numpy().astype(np.float64)
-    overall_rel_h1_samples = (torch.sqrt(torch.sum(h1_num_all.square(), dim=1)) / (torch.sqrt(torch.sum(h1_den_all.square(), dim=1)) + 1e-12)).numpy().astype(np.float64)
+    overall_rel_l2_samples = (
+        (
+            torch.sqrt(torch.sum(num_all.square(), dim=1))
+            / (torch.sqrt(torch.sum(den_all.square(), dim=1)) + 1e-8)
+        )
+        .numpy()
+        .astype(np.float64)
+    )
+    overall_rel_h1_samples = (
+        (
+            torch.sqrt(torch.sum(h1_num_all.square(), dim=1))
+            / (torch.sqrt(torch.sum(h1_den_all.square(), dim=1)) + 1e-12)
+        )
+        .numpy()
+        .astype(np.float64)
+    )
     rel_curve_mean = torch.nanmean(rel, dim=0).numpy().astype(np.float64)
     rel_curve_median = np.nanmedian(rel.numpy(), axis=0).astype(np.float64)
     rel_h1_curve_mean = torch.nanmean(rel_h1, dim=0).numpy().astype(np.float64)
     rel_h1_curve_median = np.nanmedian(rel_h1.numpy(), axis=0).astype(np.float64)
     rollout_rel_l2 = float(np.nanmean(overall_rel_l2_samples))
     rollout_rel_h1 = float(np.nanmean(overall_rel_h1_samples))
+    horizon_steps = (
+        int(num_all.shape[1])
+        if training_horizon_steps is None
+        else int(training_horizon_steps)
+    )
+    horizon_metrics = _rollout_window_metrics(
+        num_all,
+        den_all,
+        h1_num_all,
+        h1_den_all,
+        rel,
+        rel_h1,
+        horizon_steps,
+        prefix="id",
+    )
     diagnostics = compute_rollout_diagnostics(
         torch.cat(pred_batches, dim=0),
         torch.cat(ref_batches, dim=0),
@@ -259,6 +380,7 @@ def _evaluate_rollout_curves(
         "overall_rel_h1_samples": overall_rel_h1_samples,
         "overall_rel_l2": rollout_rel_l2,
         "overall_rel_h1": rollout_rel_h1,
+        **horizon_metrics,
         **diagnostics,
     }
 
@@ -276,18 +398,22 @@ def _save_per_sample_errors_json(curves: Dict[str, np.ndarray], out_path: str) -
     overall_h1 = curves["overall_rel_h1_samples"]
     items = []
     for sample_idx in range(int(rel_l2.shape[0])):
-        items.append({
-            "sample_index": sample_idx,
-            "rel_l2": _sample_stats(rel_l2[sample_idx]),
-            "rel_h1": _sample_stats(rel_h1[sample_idx]),
-            "overall_rel_l2": _sample_stats(overall_l2[sample_idx]),
-            "overall_rel_h1": _sample_stats(overall_h1[sample_idx]),
-        })
+        items.append(
+            {
+                "sample_index": sample_idx,
+                "rel_l2": _sample_stats(rel_l2[sample_idx]),
+                "rel_h1": _sample_stats(rel_h1[sample_idx]),
+                "overall_rel_l2": _sample_stats(overall_l2[sample_idx]),
+                "overall_rel_h1": _sample_stats(overall_h1[sample_idx]),
+            }
+        )
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
 
 
-def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
+def _save_rollout_curve_csv(
+    curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str
+) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -321,7 +447,9 @@ def _save_rollout_curve_csv(curves: Dict[str, np.ndarray], time_values: np.ndarr
     print(f"Saved rollout curve csv: {out_path}")
 
 
-def _plot_rollout_curves(curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str) -> None:
+def _plot_rollout_curves(
+    curves: Dict[str, np.ndarray], time_values: np.ndarray, out_path: str
+) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
@@ -331,10 +459,38 @@ def _plot_rollout_curves(curves: Dict[str, np.ndarray], time_values: np.ndarray,
     t = time_values[1 : 1 + curves["rel_curve_mean"].shape[0]]
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), squeeze=False)
     panels = [
-        (axes[0, 0], "rel_curve_mean", "relative L2", "L2", curves["rollout_rel_mean"], "tab:orange"),
-        (axes[0, 1], "rel_h1_curve_mean", "relative H1", "H1", curves["rollout_rel_h1"], "tab:red"),
-        (axes[1, 0], "enstrophy_rel_curve_mean", "relative enstrophy", "Enstrophy", curves["enstrophy_rel_error"], "tab:blue"),
-        (axes[1, 1], "palinstrophy_rel_curve_mean", "relative palinstrophy", "Palinstrophy", curves["palinstrophy_rel_error"], "tab:purple"),
+        (
+            axes[0, 0],
+            "rel_curve_mean",
+            "relative L2",
+            "L2",
+            curves["rollout_rel_mean"],
+            "tab:orange",
+        ),
+        (
+            axes[0, 1],
+            "rel_h1_curve_mean",
+            "relative H1",
+            "H1",
+            curves["rollout_rel_h1"],
+            "tab:red",
+        ),
+        (
+            axes[1, 0],
+            "enstrophy_rel_curve_mean",
+            "relative enstrophy",
+            "Enstrophy",
+            curves["enstrophy_rel_error"],
+            "tab:blue",
+        ),
+        (
+            axes[1, 1],
+            "palinstrophy_rel_curve_mean",
+            "relative palinstrophy",
+            "Palinstrophy",
+            curves["palinstrophy_rel_error"],
+            "tab:purple",
+        ),
     ]
     for ax, key, ylabel, title, aggregate, color in panels:
         ax.plot(t, curves[key], linewidth=2, color=color)
@@ -414,10 +570,22 @@ def _plot_sample_trajectories(
         rel_final_i = float(rel_curve_i[-1].item())
 
         f_plot = f[sample_id].cpu().numpy()
-        state_scale = max(float(torch.max(torch.abs(u_ref_i)).item()), float(torch.max(torch.abs(u_pred_i)).item()), 1e-8)
+        state_scale = max(
+            float(torch.max(torch.abs(u_ref_i)).item()),
+            float(torch.max(torch.abs(u_pred_i)).item()),
+            1e-8,
+        )
 
-        fig, axes = plt.subplots(3, n_cols, figsize=(3.1 * n_cols, 8.0), squeeze=False, constrained_layout=True)
-        im_force = axes[0, 0].imshow(f_plot, origin="lower", cmap="coolwarm", extent=[0.0, 1.0, 0.0, 1.0])
+        fig, axes = plt.subplots(
+            3,
+            n_cols,
+            figsize=(3.1 * n_cols, 8.0),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        im_force = axes[0, 0].imshow(
+            f_plot, origin="lower", cmap="coolwarm", extent=[0.0, 1.0, 0.0, 1.0]
+        )
         axes[0, 0].set_title("forcing")
         axes[0, 0].set_xticks([])
         axes[0, 0].set_yticks([])
@@ -474,10 +642,14 @@ def _plot_sample_trajectories(
             im_ref_last = im_ref
             im_err_last = im_err
 
-        cbar_state = fig.colorbar(im_ref_last, ax=axes[0:2, 1:], fraction=0.015, pad=0.01)
+        cbar_state = fig.colorbar(
+            im_ref_last, ax=axes[0:2, 1:], fraction=0.015, pad=0.01
+        )
         cbar_state.ax.set_ylabel("state value", rotation=90)
         if im_err_last is not None:
-            cbar_err = fig.colorbar(im_err_last, ax=axes[2, 1:], fraction=0.015, pad=0.01)
+            cbar_err = fig.colorbar(
+                im_err_last, ax=axes[2, 1:], fraction=0.015, pad=0.01
+            )
             cbar_err.ax.set_ylabel("abs error", rotation=90)
         cbar_f = fig.colorbar(im_force, ax=[axes[0, 0]], fraction=0.046, pad=0.02)
         cbar_f.ax.set_ylabel("forcing", rotation=90)
@@ -506,7 +678,9 @@ def main(args: argparse.Namespace) -> None:
     run_dir = os.path.dirname(args.checkpoint)
     args_path = os.path.join(run_dir, "args.json")
     if not os.path.exists(args_path):
-        raise FileNotFoundError(f"Training args not found next to checkpoint: {args_path}")
+        raise FileNotFoundError(
+            f"Training args not found next to checkpoint: {args_path}"
+        )
     with open(args_path, "r", encoding="utf-8") as f:
         train_args = Namespace(**json.load(f))
 
@@ -525,7 +699,9 @@ def main(args: argparse.Namespace) -> None:
     h_x = 1.0 / float(n_x)
     h_y = 1.0 / float(n_y)
     area = h_x * h_y
-    snapshot_times = _parse_snapshot_times(args.snapshot_times, t_start=t_start, t_end=t_final)
+    snapshot_times = _parse_snapshot_times(
+        args.snapshot_times, t_start=t_start, t_end=t_final
+    )
 
     model = _build_model(n_x=n_x, n_y=n_y, dt=dt, args=train_args).to(device)
     checkpoint = _torch_load_checkpoint(args.checkpoint, map_location=device)
@@ -562,7 +738,9 @@ def main(args: argparse.Namespace) -> None:
     clips_enabled = (args.delta_clip is not None and float(args.delta_clip) > 0.0) or (
         args.state_clip is not None and float(args.state_clip) > 0.0
     )
-    metrics = trainer.validate(step_loader, traj_loader=None if clips_enabled else traj_loader)
+    metrics = trainer.validate(
+        step_loader, traj_loader=None if clips_enabled else traj_loader
+    )
     curves = _evaluate_rollout_curves(
         model,
         traj_loader,
@@ -572,7 +750,12 @@ def main(args: argparse.Namespace) -> None:
         delta_clip=args.delta_clip,
         state_clip=args.state_clip,
         rollout_mode=args.rollout_mode,
+        training_horizon_steps=_infer_training_horizon_steps(train_args, n_steps),
     )
+    metrics["id_rollout_rel_l2"] = curves["id_rollout_rel_l2"]
+    metrics["id_rollout_rel_l2_std"] = curves["id_rollout_rel_l2_std"]
+    metrics["id_rollout_rel_h1"] = curves["id_rollout_rel_h1"]
+    metrics["id_rollout_rel_h1_std"] = curves["id_rollout_rel_h1_std"]
     metrics["rollout_rel_l2"] = curves["rollout_rel_mean"]
     metrics["rollout_rel_l2_median"] = curves["rollout_rel_median"]
     metrics["rollout_rel_l2_std"] = curves["rollout_rel_std"]
@@ -595,13 +778,22 @@ def main(args: argparse.Namespace) -> None:
         f"steps={n_steps}, dt={dt:.6f}, stored_time=[{t_start:.6f},{t_final:.6f}]"
     )
     print(f"Rollout mode: {args.rollout_mode}")
+    print(f"Training-horizon steps: {curves['id_steps']}")
+    print(f"Training-horizon mean relative L2: {curves['id_rollout_rel_l2']:.8e}")
+    print(f"Training-horizon std relative L2: {curves['id_rollout_rel_l2_std']:.8e}")
+    print(f"Training-horizon mean relative H1: {curves['id_rollout_rel_h1']:.8e}")
+    print(f"Training-horizon std relative H1: {curves['id_rollout_rel_h1_std']:.8e}")
     print(f"Delta clip: {args.delta_clip:.6f}")
     print(f"State clip: {args.state_clip:.6f}")
     print("Metrics:", metrics)
     print(f"Split rollout mean relative H1: {curves['rollout_rel_h1']:.8e}")
     print(f"Split rollout median relative H1: {curves['rollout_rel_h1_median']:.8e}")
-    print(f"Split rollout enstrophy relative error: {curves['enstrophy_rel_error']:.8e}")
-    print(f"Split rollout palinstrophy relative error: {curves['palinstrophy_rel_error']:.8e}")
+    print(
+        f"Split rollout enstrophy relative error: {curves['enstrophy_rel_error']:.8e}"
+    )
+    print(
+        f"Split rollout palinstrophy relative error: {curves['palinstrophy_rel_error']:.8e}"
+    )
     print(f"Split rollout spectrum relative error: {curves['spectrum_rel_error']:.8e}")
     print(f"Split rollout std relative L2: {curves['rollout_rel_std']:.8e}")
     print(f"Split rollout std relative H1: {curves['rollout_rel_h1_std']:.8e}")
@@ -622,7 +814,9 @@ def main(args: argparse.Namespace) -> None:
     curve_png = os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png")
     _save_rollout_curve_csv(curves, time_values=time_values, out_path=curve_csv)
     _plot_rollout_curves(curves, time_values=time_values, out_path=curve_png)
-    per_sample_path = os.path.join(args.output_dir, f"{args.split}_per_sample_errors.json")
+    per_sample_path = os.path.join(
+        args.output_dir, f"{args.split}_per_sample_errors.json"
+    )
     _save_per_sample_errors_json(curves, out_path=per_sample_path)
     print(f"Saved per-sample errors: {per_sample_path}")
 
@@ -653,8 +847,19 @@ def main(args: argparse.Namespace) -> None:
         "t_start": t_start,
         "t_final": t_final,
         "time_values": time_values.tolist(),
-        "error_time_values": time_values[1 : 1 + len(curves["rel_curve_mean"])].tolist(),
+        "error_time_values": time_values[
+            1 : 1 + len(curves["rel_curve_mean"])
+        ].tolist(),
         "metrics": metrics,
+        "training_horizon_steps": curves["id_steps"],
+        "id_rollout_rel_l2": curves["id_rollout_rel_l2"],
+        "id_rollout_rel_l2_median": curves["id_rollout_rel_l2_median"],
+        "id_rollout_rel_l2_std": curves["id_rollout_rel_l2_std"],
+        "id_rollout_rel_h1": curves["id_rollout_rel_h1"],
+        "id_rollout_rel_h1_median": curves["id_rollout_rel_h1_median"],
+        "id_rollout_rel_h1_std": curves["id_rollout_rel_h1_std"],
+        "id_rel_curve_mean": curves["id_rel_curve_mean"].tolist(),
+        "id_rel_h1_curve_mean": curves["id_rel_h1_curve_mean"].tolist(),
         "rollout_rel_l2": curves["rollout_rel_mean"],
         "rollout_rel_l2_median": curves["rollout_rel_median"],
         "rollout_rel_l2_std": curves["rollout_rel_std"],

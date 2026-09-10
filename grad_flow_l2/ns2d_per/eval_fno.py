@@ -233,6 +233,74 @@ def _spectral_h1_norm_2d(u: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(torch.sum(power * weight, dim=(-2, -1)))
 
 
+def _rollout_window_metrics(
+    num_all: torch.Tensor,
+    den_all: torch.Tensor,
+    h1_num_all: torch.Tensor,
+    h1_den_all: torch.Tensor,
+    rel: torch.Tensor,
+    rel_h1: torch.Tensor,
+    n_steps: int,
+    prefix: str,
+) -> Dict[str, object]:
+    n_available = int(num_all.shape[1])
+    n_window = max(1, min(int(n_steps), n_available))
+    num_w = num_all[:, :n_window]
+    den_w = den_all[:, :n_window]
+    h1_num_w = h1_num_all[:, :n_window]
+    h1_den_w = h1_den_all[:, :n_window]
+    rel_w = rel[:, :n_window]
+    rel_h1_w = rel_h1[:, :n_window]
+
+    l2_samples = (
+        (
+            torch.sqrt(torch.sum(num_w.square(), dim=1))
+            / (torch.sqrt(torch.sum(den_w.square(), dim=1)) + 1e-8)
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
+    h1_samples = (
+        (
+            torch.sqrt(torch.sum(h1_num_w.square(), dim=1))
+            / (torch.sqrt(torch.sum(h1_den_w.square(), dim=1)) + 1e-12)
+        )
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float64)
+    )
+    rel_w_cpu = rel_w.detach().cpu()
+    rel_h1_w_cpu = rel_h1_w.detach().cpu()
+
+    return {
+        f"{prefix}_steps": int(n_window),
+        f"{prefix}_rollout_rel_l2": float(np.nanmean(l2_samples)),
+        f"{prefix}_rollout_rel_l2_median": float(np.nanmedian(l2_samples)),
+        f"{prefix}_rollout_rel_l2_std": float(np.nanstd(l2_samples)),
+        f"{prefix}_rollout_rel_h1": float(np.nanmean(h1_samples)),
+        f"{prefix}_rollout_rel_h1_median": float(np.nanmedian(h1_samples)),
+        f"{prefix}_rollout_rel_h1_std": float(np.nanstd(h1_samples)),
+        f"{prefix}_rel_curve_mean": torch.nanmean(rel_w_cpu, dim=0)
+        .numpy()
+        .astype(np.float64),
+        f"{prefix}_rel_h1_curve_mean": torch.nanmean(rel_h1_w_cpu, dim=0)
+        .numpy()
+        .astype(np.float64),
+        f"{prefix}_overall_rel_l2_samples": l2_samples,
+        f"{prefix}_overall_rel_h1_samples": h1_samples,
+    }
+
+
+def _infer_training_horizon_steps(train_args: Namespace, n_steps: int) -> int:
+    train_steps = getattr(train_args, "train_steps_used", None)
+    if train_steps is None:
+        return int(n_steps)
+    return max(1, min(int(train_steps), int(n_steps)))
+
+
 def _state_reduce_dims(u: torch.Tensor) -> tuple[int, ...]:
     return (-3, -2, -1) if u.dim() == 5 else (-2, -1)
 
@@ -245,6 +313,7 @@ def _evaluate_rollout_curves(
     dt: float,
     area: float,
     delta_clip: float | None,
+    training_horizon_steps: int | None = None,
 ) -> Dict[str, np.ndarray]:
     u0 = split["u0"].to(device)
     f = split["f"].to(device)
@@ -262,16 +331,16 @@ def _evaluate_rollout_curves(
     if h1_num.dim() == 3:
         h1_num = h1_num.sum(dim=-1)
         h1_den = h1_den.sum(dim=-1)
-    num = num[:, 1:]
-    den = den[:, 1:]
-    h1_num = h1_num[:, 1:]
-    h1_den = h1_den[:, 1:]
-    rel = num / (den + 1e-8)
-    rel_h1 = h1_num / (h1_den + 1e-12)
+    num_all = num[:, 1:]
+    den_all = den[:, 1:]
+    h1_num_all = h1_num[:, 1:]
+    h1_den_all = h1_den[:, 1:]
+    rel = num_all / (den_all + 1e-8)
+    rel_h1 = h1_num_all / (h1_den_all + 1e-12)
     overall_rel_l2_samples = (
         (
-            torch.sqrt(torch.sum(num.square(), dim=1))
-            / (torch.sqrt(torch.sum(den.square(), dim=1)) + 1e-8)
+            torch.sqrt(torch.sum(num_all.square(), dim=1))
+            / (torch.sqrt(torch.sum(den_all.square(), dim=1)) + 1e-8)
         )
         .detach()
         .cpu()
@@ -280,8 +349,8 @@ def _evaluate_rollout_curves(
     )
     overall_rel_h1_samples = (
         (
-            torch.sqrt(torch.sum(h1_num.square(), dim=1))
-            / (torch.sqrt(torch.sum(h1_den.square(), dim=1)) + 1e-12)
+            torch.sqrt(torch.sum(h1_num_all.square(), dim=1))
+            / (torch.sqrt(torch.sum(h1_den_all.square(), dim=1)) + 1e-12)
         )
         .detach()
         .cpu()
@@ -296,6 +365,21 @@ def _evaluate_rollout_curves(
     rel_h1_curve_median = np.nanmedian(rel_h1_cpu.numpy(), axis=0).astype(np.float64)
     rollout_rel_l2 = float(np.nanmean(overall_rel_l2_samples))
     rollout_rel_h1 = float(np.nanmean(overall_rel_h1_samples))
+    horizon_steps = (
+        int(num_all.shape[1])
+        if training_horizon_steps is None
+        else int(training_horizon_steps)
+    )
+    horizon_metrics = _rollout_window_metrics(
+        num_all,
+        den_all,
+        h1_num_all,
+        h1_den_all,
+        rel,
+        rel_h1,
+        horizon_steps,
+        prefix="id",
+    )
     diagnostics = compute_rollout_diagnostics(
         u_pred.detach().cpu(), u_ref.detach().cpu(), area=area
     )
@@ -319,6 +403,7 @@ def _evaluate_rollout_curves(
         "overall_rel_h1_samples": overall_rel_h1_samples,
         "overall_rel_l2": rollout_rel_l2,
         "overall_rel_h1": rollout_rel_h1,
+        **horizon_metrics,
         **diagnostics,
     }
 
@@ -670,10 +755,22 @@ def main(args: argparse.Namespace) -> None:
     print(f"Loaded checkpoint: {args.checkpoint_path}")
 
     step_mse = _evaluate_one_step_mse(model, split, device=device, dt=dt)
+    training_horizon_steps = _infer_training_horizon_steps(train_args, n_steps)
     curves = _evaluate_rollout_curves(
-        model, split, device=device, dt=dt, area=area, delta_clip=delta_clip
+        model,
+        split,
+        device=device,
+        dt=dt,
+        area=area,
+        delta_clip=delta_clip,
+        training_horizon_steps=training_horizon_steps,
     )
     print(f"Split one-step MSE: {step_mse:.8e}")
+    print(f"Training-horizon steps: {curves['id_steps']}")
+    print(f"Training-horizon mean relative L2: {curves['id_rollout_rel_l2']:.8e}")
+    print(f"Training-horizon std relative L2: {curves['id_rollout_rel_l2_std']:.8e}")
+    print(f"Training-horizon mean relative H1: {curves['id_rollout_rel_h1']:.8e}")
+    print(f"Training-horizon std relative H1: {curves['id_rollout_rel_h1_std']:.8e}")
     print(f"Split rollout mean relative L2: {curves['rollout_rel_mean']:.8e}")
     print(f"Split rollout median relative L2: {curves['rollout_rel_median']:.8e}")
     print(f"Split rollout mean relative H1: {curves['rollout_rel_h1']:.8e}")
@@ -738,6 +835,15 @@ def main(args: argparse.Namespace) -> None:
         ].tolist(),
         "delta_clip": args.delta_clip,
         "step_mse": step_mse,
+        "training_horizon_steps": curves["id_steps"],
+        "id_rollout_rel_l2": curves["id_rollout_rel_l2"],
+        "id_rollout_rel_l2_median": curves["id_rollout_rel_l2_median"],
+        "id_rollout_rel_l2_std": curves["id_rollout_rel_l2_std"],
+        "id_rollout_rel_h1": curves["id_rollout_rel_h1"],
+        "id_rollout_rel_h1_median": curves["id_rollout_rel_h1_median"],
+        "id_rollout_rel_h1_std": curves["id_rollout_rel_h1_std"],
+        "id_rel_curve_mean": curves["id_rel_curve_mean"].tolist(),
+        "id_rel_h1_curve_mean": curves["id_rel_h1_curve_mean"].tolist(),
         "rollout_rel_l2": curves["rollout_rel_mean"],
         "rollout_rel_l2_median": curves["rollout_rel_median"],
         "rollout_rel_l2_std": curves["rollout_rel_std"],
