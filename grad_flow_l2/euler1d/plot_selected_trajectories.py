@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split", type=str, default="test", choices=["train", "val", "test"]
     )
-    parser.add_argument("--sample-indices", type=str, default="0")
+    parser.add_argument("--sample-indices", type=str, default="0,4,6,11")
     parser.add_argument(
         "--snapshot-times",
         type=str,

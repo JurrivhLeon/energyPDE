@@ -81,7 +81,7 @@ def _apply_axes_style(ax: plt.Axes, x_values: np.ndarray) -> None:
 
 
 def plot_setting(root: Path, output_dir: Path, setting: int) -> Path:
-    fig, axes = plt.subplots(1, len(METRICS), figsize=(10, 4.5), sharex=True)
+    fig, axes = plt.subplots(1, len(METRICS), figsize=(10, 4), sharex=True)
     all_x_values: list[np.ndarray] = []
 
     for method_dir_template, method_label, linestyle, marker in METHODS:
@@ -121,18 +121,18 @@ def plot_setting(root: Path, output_dir: Path, setting: int) -> Path:
         )
         _apply_axes_style(ax, longest_x_values)
 
-    fig.suptitle(f"Euler1D L={setting}", y=0.99, fontsize=15)
+    #fig.suptitle(f"Euler1D L={setting}", y=0.99, fontsize=15)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
         handles,
         labels,
         loc="upper center",
         ncol=len(METHODS) + 1,
-        bbox_to_anchor=(0.5, 0.925),
+        bbox_to_anchor=(0.5, 0.99),
         fontsize=12,
         frameon=False,
     )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.925))
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     png_path = output_dir / f"euler1d_L{setting}_metric_trends.png"
