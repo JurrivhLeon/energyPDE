@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split", type=str, default="test", choices=["train", "val", "test"]
     )
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default=None)
@@ -491,7 +491,7 @@ def make_plot(
     true_ens = _enstrophy(u_ref, area).numpy()
     true_pal = _palinstrophy(u_ref, area).numpy()
 
-    fig, axes = plt.subplots(2, 4, figsize=(15.0, 6.0), sharex=True)
+    fig, axes = plt.subplots(2, 4, figsize=(14.0, 5.0), sharex=True)
     train_horizon = TRAINING_HORIZONS.get(nu)
     for col, (method_label, kind, color, run_dir, summary) in enumerate(method_infos):
         pred = _rollout_method(kind, run_dir, summary, split, dt, device)
@@ -537,20 +537,20 @@ def make_plot(
     train_proxy = Patch(
         facecolor="0.88", edgecolor="none", alpha=0.45, label="Training horizon"
     )
-    fig.suptitle(
-        rf"NS2D physical diagnostics, $\nu=10^{{-{nu}}}$, {forcing_label}, N={int(u_ref.shape[0])}",
-        y=0.99,
-        fontsize=15,
-    )
+    #fig.suptitle(
+    #    rf"NS2D physical diagnostics, $\nu=10^{{-{nu}}}$, {forcing_label}, N={int(u_ref.shape[0])}",
+    #    y=0.99,
+    #    fontsize=15,
+    #)
     fig.legend(
         handles=[true_proxy, pred_proxy, train_proxy],
         loc="upper center",
         ncol=3,
-        bbox_to_anchor=(0.5, 0.95),
+        bbox_to_anchor=(0.5, 0.99),
         frameon=False,
         fontsize=15,
     )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"ns2d_nu{nu}_{forcing}_physical_diagnostics.png"

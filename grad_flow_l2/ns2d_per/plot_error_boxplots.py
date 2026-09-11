@@ -21,8 +21,8 @@ METHODS = [
 ]
 
 FORCINGS = [
-    ("grf", "GRF"),
-    ("sinusoidal", "Wave"),
+    ("grf", "Forcing type: GRF"),
+    ("sinusoidal", "Forcing type: Wave"),
 ]
 
 
@@ -181,7 +181,7 @@ def make_plot(
     dpi: int,
     show_fliers: bool,
 ) -> Path:
-    fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.0), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(15.0, 5.5), sharey=True)
     all_sources = []
     for ax, (forcing, forcing_label) in zip(axes, FORCINGS):
         all_sources.extend(
@@ -195,12 +195,7 @@ def make_plot(
             )
         )
 
-    axes[0].set_ylabel("Accumulated relative error", fontsize=18, labelpad=9)
-    fig.suptitle(
-        rf"NS2D per-trajectory rollout errors, $\nu=10^{{-{nu}}}$",
-        fontsize=21,
-        y=0.96,
-    )
+    axes[0].set_ylabel("Aggregate relative error", fontsize=18, labelpad=9)
     legend_handles = [
         Patch(facecolor=color, edgecolor="black", alpha=0.72, label=label)
         for _, label, color in METHODS
@@ -208,7 +203,7 @@ def make_plot(
     fig.legend(
         handles=legend_handles,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.89),
+        bbox_to_anchor=(0.5, 1.0),
         ncol=4,
         frameon=False,
         fontsize=18,
@@ -216,7 +211,7 @@ def make_plot(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"ns2d_nu{nu}_l2_h1_boxplots.png"
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88), w_pad=2.0)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.89), w_pad=2.0)
     fig.savefig(out_path, dpi=dpi)
     plt.close(fig)
 

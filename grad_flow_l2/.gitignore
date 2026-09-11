@@ -13,6 +13,7 @@ venv/
 datasets/
 outputs/
 heat/outputs/
+*tex/
 *.pt
 *.pth
 *.ckpt

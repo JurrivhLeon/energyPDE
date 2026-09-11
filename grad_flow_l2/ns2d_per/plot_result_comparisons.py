@@ -158,7 +158,7 @@ def make_plot(
         curve = _load_method_curve(results_dir, nu, forcing, patterns)
         curves.append((label, color, linestyle, marker, curve))
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7.0), sharex=True)
     axes_flat = axes.ravel()
     base_time = _time_values(curves[0][4], METRICS[0][0])
     t_min = 0.0
@@ -202,22 +202,22 @@ def make_plot(
     handles, labels = axes_flat[0].get_legend_handles_labels()
     handles.append(Patch(facecolor="0.9", edgecolor="none", alpha=0.45))
     labels.append("training horizon")
-    fig.suptitle(
-        rf"NS2D Rollout Errors, $\nu=10^{{-{nu}}}$, {forcing_label}",
-        y=0.985,
-        fontsize=17.5,
-    )
+    #fig.suptitle(
+    #    rf"NS2D Rollout Errors, $\nu=10^{{-{nu}}}$, {forcing_label}",
+    #    y=0.985,
+    #    fontsize=17.5,
+    #)
     fig.legend(
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.945),
+        bbox_to_anchor=(0.5, 0.99),
         ncol=5,
         frameon=False,
         fontsize=15,
     )
     fig.subplots_adjust(
-        left=0.08, right=0.98, bottom=0.06, top=0.82, hspace=0.32, wspace=0.25
+        left=0.08, right=0.98, bottom=0.06, top=0.85, hspace=0.32, wspace=0.25
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
