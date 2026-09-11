@@ -35,6 +35,7 @@ try:
         channel_weights_from_split,
         relative_l2_error_1d,
         resolve_device,
+        rollout_vae_latent_mean_1d,
         rollout_vae_mean_1d,
     )
     from .euler_data import (
@@ -56,6 +57,7 @@ except ImportError:
         channel_weights_from_split,
         relative_l2_error_1d,
         resolve_device,
+        rollout_vae_latent_mean_1d,
         rollout_vae_mean_1d,
     )
     from grad_flow_l2.euler1d.euler_data import (
@@ -137,6 +139,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--rollout-delta-clip", type=float, default=5.0)
+    p.add_argument(
+        "--rollout-mode",
+        type=str,
+        default="latent",
+        choices=["latent", "physical"],
+        help="Validation rollout style for VAE model selection.",
+    )
     p.add_argument(
         "--channel-weights",
         type=float,
@@ -224,6 +233,7 @@ class EulerLatentVAETrainer:
         weight_decay=1e-5,
         grad_clip=1.0,
         rollout_delta_clip: Optional[float] = 2.0,
+        rollout_mode="latent",
         device="cpu",
         output_dir=None,
         show_epoch_pbar=True,
@@ -238,6 +248,9 @@ class EulerLatentVAETrainer:
         self.rollout_delta_clip = (
             None if rollout_delta_clip is None else float(rollout_delta_clip)
         )
+        self.rollout_mode = str(rollout_mode).lower()
+        if self.rollout_mode not in {"latent", "physical"}:
+            raise ValueError("rollout_mode must be 'latent' or 'physical'")
         self.device = device
         self.output_dir = output_dir
         self.show_epoch_pbar = bool(show_epoch_pbar)
@@ -302,7 +315,9 @@ class EulerLatentVAETrainer:
                 m.update(losses[k].item(), bsz)
             if pbar is not None and (i == 1 or i % 10 == 0):
                 pbar.set_postfix(
-                    total=f"{meters['loss'].avg:.4f}", alpha=f"{meters['alpha_mean'].avg:.4f}", kl=f"{meters['loss_kl'].avg:.4f}"
+                    total=f"{meters['loss'].avg:.4f}",
+                    alpha=f"{meters['alpha_mean'].avg:.4f}",
+                    kl=f"{meters['loss_kl'].avg:.4f}",
                 )
         if pbar is not None:
             pbar.close()
@@ -340,7 +355,12 @@ class EulerLatentVAETrainer:
                     batch["f"].to(self.device),
                     batch["u_traj"].to(self.device),
                 )
-                pred = rollout_vae_mean_1d(
+                rollout_fn = (
+                    rollout_vae_latent_mean_1d
+                    if self.rollout_mode == "latent"
+                    else rollout_vae_mean_1d
+                )
+                pred = rollout_fn(
                     self.model,
                     u0,
                     f,
@@ -375,6 +395,7 @@ class EulerLatentVAETrainer:
                 "beta_kl": self.beta_kl,
                 "lambda_rec": self.lambda_rec,
                 "rollout_delta_clip": self.rollout_delta_clip,
+                "rollout_mode": self.rollout_mode,
                 "channel_weights": self.channel_weights.detach().cpu(),
             },
             os.path.join(self.output_dir, name),
@@ -464,6 +485,7 @@ def main(args):
         f"Grid: n_x={n_x}, channels={STATE_CHANNELS}, steps={n_steps}, dt={dt:.6f}, L={domain_length}, bc={bc}"
     )
     print(f"Channel weights (rho,u,p): {channel_weights.tolist()}")
+    print(f"Rollout mode: {args.rollout_mode}")
     train_step = DataLoader(
         build_euler1d_step_dataset(train_split),
         batch_size=args.batch_size,
@@ -530,6 +552,7 @@ def main(args):
         rollout_delta_clip=(
             args.rollout_delta_clip if args.rollout_delta_clip > 0 else None
         ),
+        rollout_mode=args.rollout_mode,
         device=device,
         output_dir=run_dir,
         show_epoch_pbar=not args.no_epoch_pbar,

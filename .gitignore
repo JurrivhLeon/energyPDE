@@ -12,11 +12,13 @@ venv/
 # Data, checkpoints, models
 datasets/
 */datasets/
+scripts/
 *.pt
 *.pth
 *.ckpt
 *.npz
 *.npy
+*.sh
 
 # Generated outputs/figures/logs
 outputs/

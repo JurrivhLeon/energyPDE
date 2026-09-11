@@ -21,6 +21,7 @@ try:
         channel_weighted_mse,
         relative_l2_error_1d,
         resolve_device,
+        rollout_vae_latent_mean_1d,
         rollout_vae_mean_1d,
         safe_torch_load,
     )
@@ -37,6 +38,7 @@ except ImportError:
         channel_weighted_mse,
         relative_l2_error_1d,
         resolve_device,
+        rollout_vae_latent_mean_1d,
         rollout_vae_mean_1d,
         safe_torch_load,
     )
@@ -62,6 +64,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--snapshot-times", type=str, default="")
     p.add_argument("--max-snapshots", type=int, default=None)
     p.add_argument("--delta-clip", type=float, default=None)
+    p.add_argument(
+        "--rollout-mode",
+        type=str,
+        default="latent",
+        choices=["latent", "physical"],
+        help="Rollout style for VAE evaluation.",
+    )
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--cpu", action="store_true")
     return p.parse_args()
@@ -123,7 +132,9 @@ def evaluate_step(model, step_loader, device, dt, channel_weights):
 
 
 @torch.no_grad()
-def evaluate_rollout(model, traj_loader, device, dt, h, domain_length, delta_clip):
+def evaluate_rollout(
+    model, traj_loader, device, dt, h, domain_length, delta_clip, rollout_mode="latent"
+):
     num_batches = []
     den_batches = []
     l1_num_batches = []
@@ -135,7 +146,12 @@ def evaluate_rollout(model, traj_loader, device, dt, h, domain_length, delta_cli
             batch["f"].to(device),
             batch["u_traj"].to(device),
         )
-        pred = rollout_vae_mean_1d(
+        rollout_fn = (
+            rollout_vae_latent_mean_1d
+            if str(rollout_mode).lower() == "latent"
+            else rollout_vae_mean_1d
+        )
+        pred = rollout_fn(
             model, u0, f, n_steps=int(ref.shape[1] - 1), dt=dt, delta_clip=delta_clip
         )
         diff = pred - ref
@@ -314,6 +330,7 @@ def _plot_samples(
     n_plot_samples,
     output_dir,
     delta_clip,
+    rollout_mode="latent",
 ):
     try:
         import matplotlib.pyplot as plt
@@ -335,9 +352,14 @@ def _plot_samples(
         u0 = split["u0"][sample_id : sample_id + 1].to(device)
         f = split["f"][sample_id : sample_id + 1].to(device)
         ref = split["u_traj"][sample_id]
-        pred = rollout_vae_mean_1d(
-            model, u0, f, n_steps=n_steps, dt=dt, delta_clip=delta_clip
-        )[0].cpu()
+        rollout_fn = (
+            rollout_vae_latent_mean_1d
+            if str(rollout_mode).lower() == "latent"
+            else rollout_vae_mean_1d
+        )
+        pred = rollout_fn(model, u0, f, n_steps=n_steps, dt=dt, delta_clip=delta_clip)[
+            0
+        ].cpu()
         abs_err = (pred - ref).abs()
         rel_l2 = relative_l2_error_1d(pred.unsqueeze(0), ref.unsqueeze(0), h=h)[0]
         l1_num = float(h) * (pred - ref).abs().sum(dim=-1)
@@ -460,7 +482,14 @@ def main(args):
     )
     step_metrics = evaluate_step(model, step_loader, device, dt, channel_weights)
     curves = evaluate_rollout(
-        model, traj_loader, device, dt, h, domain_length, delta_clip
+        model,
+        traj_loader,
+        device,
+        dt,
+        h,
+        domain_length,
+        delta_clip,
+        rollout_mode=args.rollout_mode,
     )
     metrics = dict(step_metrics)
     for c, name in enumerate(CHANNEL_NAMES):
@@ -474,7 +503,7 @@ def main(args):
     _add_rollout_max_metrics(metrics, curves)
     print(f"Device: {device}")
     print(
-        f"Split={args.split}, n={int(split['u0'].shape[0])}, n_x={n_x}, steps={n_steps}, dt={dt}, L={domain_length}, delta_clip={delta_clip}"
+        f"Split={args.split}, n={int(split['u0'].shape[0])}, n_x={n_x}, steps={n_steps}, dt={dt}, L={domain_length}, delta_clip={delta_clip}, rollout_mode={args.rollout_mode}"
     )
     print("Metrics:")
     for k, v in metrics.items():
@@ -504,6 +533,7 @@ def main(args):
         args.n_plot_samples,
         os.path.join(args.output_dir, f"{args.split}_sample_comparisons"),
         delta_clip,
+        rollout_mode=args.rollout_mode,
     )
     summary = {
         "dataset_path": args.dataset_path,
@@ -518,6 +548,7 @@ def main(args):
         ).tolist(),
         "domain_length": domain_length,
         "delta_clip": delta_clip,
+        "rollout_mode": args.rollout_mode,
         "metrics": metrics,
         "overall_rel_l2": curves["overall_rel_l2"],
         "overall_rel_l1": curves["overall_rel_l1"],

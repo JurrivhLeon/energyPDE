@@ -20,7 +20,7 @@ try:
     from .cfd_data import STATE_CHANNELS
     from .train import _build_model as _build_ae_model
     from .train_vae import _build_model as _build_vae_model
-    from .train_vae import _rollout_vae_mean
+    from .train_vae import _rollout_vae_latent_mean, _rollout_vae_mean
 except ImportError:
     from grad_flow_l2.heat_data import load_dataset_splits
     from grad_flow_l2.latent_markov_trainer_mc import rollout_latent_markov_2d
@@ -29,7 +29,7 @@ except ImportError:
     from grad_flow_l2.cfd2d.cfd_data import STATE_CHANNELS
     from grad_flow_l2.cfd2d.train import _build_model as _build_ae_model
     from grad_flow_l2.cfd2d.train_vae import _build_model as _build_vae_model
-    from grad_flow_l2.cfd2d.train_vae import _rollout_vae_mean
+    from grad_flow_l2.cfd2d.train_vae import _rollout_vae_latent_mean, _rollout_vae_mean
 
 
 CHANNEL_NAMES = ["rho", "vx", "vy", "p"]
@@ -342,8 +342,19 @@ def _rollout_vae(
     delta_clip = eval_ae._resolve_delta_clip(
         None, checkpoint, default=float(summary.get("delta_clip", 1.0))
     )
+    rollout_mode = str(
+        summary.get(
+            "rollout_mode",
+            checkpoint.get(
+                "rollout_mode", getattr(train_args, "rollout_mode", "latent")
+            ),
+        )
+    ).lower()
+    rollout_fn = (
+        _rollout_vae_latent_mean if rollout_mode == "latent" else _rollout_vae_mean
+    )
     return (
-        _rollout_vae_mean(
+        rollout_fn(
             model,
             u0=u0,
             f=f,
