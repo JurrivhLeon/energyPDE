@@ -74,7 +74,8 @@ def parse_args() -> argparse.Namespace:
         default=",".join(str(t) for t in SNAPSHOT_TIMES),
     )
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=100)
+    parser.add_argument("--format", type=str, default="jpeg", choices=["png", "jpeg"])
     return parser.parse_args()
 
 
@@ -279,7 +280,7 @@ def _rollout_vae(
     rollout_mode = str(
         summary.get(
             "rollout_mode",
-            ckpt.get("rollout_mode", getattr(train_args, "rollout_mode", "latent")),
+            ckpt.get("rollout_mode", getattr(train_args, "rollout_mode", "physical")),
         )
     ).lower()
     rollout_fn = (
@@ -338,6 +339,7 @@ def _plot_sample(
     steps: List[int],
     preds: List[Tuple[str, str, torch.Tensor]],
     dpi: int,
+    plot_format: str,
 ) -> Path:
     ref = split["u_traj"][local_index].detach().cpu().numpy()
     pred_arrays = [
@@ -452,16 +454,21 @@ def _plot_sample(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    png_path = (
-        output_dir / f"euler1d_L{setting}_sample_{sample_id:04d}_trajectory_curves.png"
+    suffix = ".jpeg" if str(plot_format).lower() == "jpeg" else ".png"
+    image_path = (
+        output_dir
+        / f"euler1d_L{setting}_sample_{sample_id:04d}_trajectory_curves{suffix}"
     )
     pdf_path = (
         output_dir / f"euler1d_L{setting}_sample_{sample_id:04d}_trajectory_curves.pdf"
     )
-    fig.savefig(png_path, dpi=dpi)
+    save_kwargs = {"dpi": int(dpi)}
+    if str(plot_format).lower() == "jpeg":
+        save_kwargs.update(format="jpeg", facecolor="white")
+    fig.savefig(image_path, **save_kwargs)
     fig.savefig(pdf_path)
     plt.close(fig)
-    return png_path
+    return image_path
 
 
 def make_plots_for_setting(
@@ -473,6 +480,7 @@ def make_plots_for_setting(
     snapshot_times: List[float],
     device: str,
     dpi: int,
+    plot_format: str,
 ) -> List[Path]:
     method_infos = []
     for template, eval_dir, label, kind, color in METHODS:
@@ -508,6 +516,7 @@ def make_plots_for_setting(
                 steps,
                 preds,
                 dpi,
+                plot_format,
             )
         )
     return written
@@ -529,6 +538,7 @@ def main() -> None:
                 _parse_times(args.snapshot_times),
                 device,
                 args.dpi,
+                args.format,
             )
         )
     print("Wrote Euler1D selected trajectory plots:")

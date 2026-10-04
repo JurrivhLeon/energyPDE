@@ -80,7 +80,13 @@ def _apply_axes_style(ax: plt.Axes, x_values: np.ndarray) -> None:
         ax.set_xticks(np.linspace(0.0, x_max, 11))
 
 
-def plot_setting(root: Path, output_dir: Path, setting: int) -> Path:
+def plot_setting(
+    root: Path,
+    output_dir: Path,
+    setting: int,
+    dpi: int = 150,
+    plot_format: str = "jpeg",
+) -> Path:
     fig, axes = plt.subplots(1, len(METRICS), figsize=(10, 4), sharex=True)
     all_x_values: list[np.ndarray] = []
 
@@ -121,7 +127,7 @@ def plot_setting(root: Path, output_dir: Path, setting: int) -> Path:
         )
         _apply_axes_style(ax, longest_x_values)
 
-    #fig.suptitle(f"Euler1D L={setting}", y=0.99, fontsize=15)
+    # fig.suptitle(f"Euler1D L={setting}", y=0.99, fontsize=15)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
         handles,
@@ -135,12 +141,16 @@ def plot_setting(root: Path, output_dir: Path, setting: int) -> Path:
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    png_path = output_dir / f"euler1d_L{setting}_metric_trends.png"
+    suffix = ".jpeg" if str(plot_format).lower() == "jpeg" else ".png"
+    image_path = output_dir / f"euler1d_L{setting}_metric_trends{suffix}"
     pdf_path = output_dir / f"euler1d_L{setting}_metric_trends.pdf"
-    fig.savefig(png_path, dpi=300)
+    save_kwargs = {"dpi": int(dpi)}
+    if str(plot_format).lower() == "jpeg":
+        save_kwargs.update(format="jpeg", facecolor="white")
+    fig.savefig(image_path, **save_kwargs)
     fig.savefig(pdf_path)
     plt.close(fig)
-    return png_path
+    return image_path
 
 
 def main() -> None:
@@ -157,11 +167,15 @@ def main() -> None:
         default=None,
         help="Directory for comparison plots. Defaults to ROOT/comparison_plots.",
     )
+    parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument("--format", type=str, default="jpeg", choices=["png", "jpeg"])
     args = parser.parse_args()
 
     output_dir = args.output_dir or (args.root / "comparison_plots")
     for setting in SETTINGS:
-        path = plot_setting(args.root, output_dir, setting)
+        path = plot_setting(
+            args.root, output_dir, setting, dpi=args.dpi, plot_format=args.format
+        )
         print(path)
 
 

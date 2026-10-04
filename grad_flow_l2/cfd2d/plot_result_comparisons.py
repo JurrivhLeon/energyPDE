@@ -80,7 +80,9 @@ def _apply_axes_style(ax: plt.Axes, x_values: np.ndarray) -> None:
         ax.set_xticks(np.linspace(0.0, x_max, 11))
 
 
-def plot_comparison(root: Path, output_dir: Path) -> Path:
+def plot_comparison(
+    root: Path, output_dir: Path, dpi: int = 150, plot_format: str = "jpeg"
+) -> Path:
     fig, axes = plt.subplots(1, len(METRICS), figsize=(10, 4), sharex=True)
     all_x_values: list[np.ndarray] = []
 
@@ -133,17 +135,21 @@ def plot_comparison(root: Path, output_dir: Path) -> Path:
         ncol=len(METHODS) + 1,
         bbox_to_anchor=(0.5, 0.925),
         frameon=False,
-        fontsize=12.5
+        fontsize=12.5,
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    png_path = output_dir / "cfd2d_nu8_metric_trends.png"
+    suffix = ".jpeg" if str(plot_format).lower() == "jpeg" else ".png"
+    image_path = output_dir / f"cfd2d_nu8_metric_trends{suffix}"
     pdf_path = output_dir / "cfd2d_nu8_metric_trends.pdf"
-    fig.savefig(png_path, dpi=300)
+    save_kwargs = {"dpi": int(dpi)}
+    if str(plot_format).lower() == "jpeg":
+        save_kwargs.update(format="jpeg", facecolor="white")
+    fig.savefig(image_path, **save_kwargs)
     fig.savefig(pdf_path)
     plt.close(fig)
-    return png_path
+    return image_path
 
 
 def main() -> None:
@@ -160,10 +166,12 @@ def main() -> None:
         default=None,
         help="Directory for comparison plots. Defaults to ROOT/comparison_plots.",
     )
+    parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument("--format", type=str, default="png", choices=["png", "jpeg"])
     args = parser.parse_args()
 
     output_dir = args.output_dir or (args.root / "comparison_plots")
-    print(plot_comparison(args.root, output_dir))
+    print(plot_comparison(args.root, output_dir, dpi=args.dpi, plot_format=args.format))
 
 
 if __name__ == "__main__":

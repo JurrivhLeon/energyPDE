@@ -141,12 +141,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split", type=str, default="test", choices=["train", "val", "test"]
     )
-    parser.add_argument("--sample-indices", type=str, default="0")
+    parser.add_argument("--sample-indices", type=str, default="0,10")
     parser.add_argument(
         "--snapshot-steps", type=str, default=",".join(str(s) for s in SNAPSHOT_STEPS)
     )
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=100)
+    parser.add_argument("--format", type=str, default="png", choices=["png", "jpeg"])
     return parser.parse_args()
 
 
@@ -346,7 +347,7 @@ def _rollout_vae(
         summary.get(
             "rollout_mode",
             checkpoint.get(
-                "rollout_mode", getattr(train_args, "rollout_mode", "latent")
+                "rollout_mode", getattr(train_args, "rollout_mode", "physical")
             ),
         )
     ).lower()
@@ -410,6 +411,7 @@ def _plot_sample(
     steps: List[int],
     dt: float,
     dpi: int,
+    plot_format: str,
 ) -> Path:
     ref = split["u_traj"][local_index].detach().cpu().numpy()
     pred_arrays = [
@@ -521,12 +523,18 @@ def _plot_sample(
     )"""
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    png_path = output_dir / f"cfd2d_sample_{sample_id:04d}_trajectory_comparison.png"
+    suffix = ".jpeg" if str(plot_format).lower() == "jpeg" else ".png"
+    image_path = (
+        output_dir / f"cfd2d_sample_{sample_id:04d}_trajectory_comparison{suffix}"
+    )
     pdf_path = output_dir / f"cfd2d_sample_{sample_id:04d}_trajectory_comparison.pdf"
-    fig.savefig(png_path, dpi=dpi)
+    save_kwargs = {"dpi": int(dpi)}
+    if str(plot_format).lower() == "jpeg":
+        save_kwargs.update(format="jpeg", facecolor="white")
+    fig.savefig(image_path, **save_kwargs)
     fig.savefig(pdf_path)
     plt.close(fig)
-    return png_path
+    return image_path
 
 
 def main() -> None:
@@ -562,6 +570,7 @@ def main() -> None:
                 steps,
                 dt,
                 args.dpi,
+                args.format,
             )
         )
     print("Wrote CFD2D selected trajectory plots:")

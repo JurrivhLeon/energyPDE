@@ -61,19 +61,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--n-plot-samples", type=int, default=4)
+    p.add_argument("--plot-dpi", type=int, default=150)
+    p.add_argument("--plot-format", type=str, default="jpeg", choices=["png", "jpeg"])
     p.add_argument("--snapshot-times", type=str, default="")
     p.add_argument("--max-snapshots", type=int, default=None)
     p.add_argument("--delta-clip", type=float, default=None)
     p.add_argument(
         "--rollout-mode",
         type=str,
-        default="latent",
+        default="physical",
         choices=["latent", "physical"],
         help="Rollout style for VAE evaluation.",
     )
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--cpu", action="store_true")
     return p.parse_args()
+
+
+def _plot_output_path(path: str, plot_format: str) -> str:
+    fmt = str(plot_format).lower()
+    if fmt in {"jpg", "jpeg"}:
+        return os.path.splitext(path)[0] + ".jpeg"
+    if fmt == "png":
+        return os.path.splitext(path)[0] + ".png"
+    raise ValueError(f"Unsupported plot format: {plot_format}")
+
+
+def _save_figure(fig, path: str, plot_dpi: int, plot_format: str) -> None:
+    output_path = _plot_output_path(path, plot_format)
+    kwargs = {"dpi": int(plot_dpi)}
+    if str(plot_format).lower() in {"jpg", "jpeg"}:
+        kwargs.update(format="jpeg", facecolor="white")
+    fig.savefig(output_path, **kwargs)
 
 
 def _load_train_args(args):
@@ -292,7 +311,7 @@ def _save_curve_csv(curves, dt, path):
             wr.writerow(row)
 
 
-def _plot_curve(curves, dt, path):
+def _plot_curve(curves, dt, path, plot_dpi=150, plot_format="jpeg"):
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
@@ -314,7 +333,7 @@ def _plot_curve(curves, dt, path):
         ax.grid(alpha=0.3)
         ax.legend()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.savefig(path, dpi=180)
+    _save_figure(fig, path, plot_dpi, plot_format)
     plt.close(fig)
 
 
@@ -331,6 +350,8 @@ def _plot_samples(
     output_dir,
     delta_clip,
     rollout_mode="latent",
+    plot_dpi=150,
+    plot_format="jpeg",
 ):
     try:
         import matplotlib.pyplot as plt
@@ -424,8 +445,11 @@ def _plot_samples(
         for ax in axes[3]:
             ax.grid(alpha=0.3)
             ax.legend(fontsize=8)
-        fig.savefig(
-            os.path.join(output_dir, f"sample_{sample_id:04d}_comparison.png"), dpi=150
+        _save_figure(
+            fig,
+            os.path.join(output_dir, f"sample_{sample_id:04d}_comparison.png"),
+            plot_dpi,
+            plot_format,
         )
         plt.close(fig)
 
@@ -490,6 +514,8 @@ def main(args):
         domain_length,
         delta_clip,
         rollout_mode=args.rollout_mode,
+        plot_dpi=args.plot_dpi,
+        plot_format=args.plot_format,
     )
     metrics = dict(step_metrics)
     for c, name in enumerate(CHANNEL_NAMES):
@@ -521,6 +547,8 @@ def main(args):
         curves,
         dt,
         os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png"),
+        plot_dpi=args.plot_dpi,
+        plot_format=args.plot_format,
     )
     _plot_samples(
         model,
@@ -548,6 +576,8 @@ def main(args):
         ).tolist(),
         "domain_length": domain_length,
         "delta_clip": delta_clip,
+        "plot_dpi": args.plot_dpi,
+        "plot_format": args.plot_format,
         "rollout_mode": args.rollout_mode,
         "metrics": metrics,
         "overall_rel_l2": curves["overall_rel_l2"],

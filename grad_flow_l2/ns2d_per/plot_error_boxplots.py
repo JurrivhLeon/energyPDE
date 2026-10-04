@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory where boxplot figures are written.",
     )
     parser.add_argument("--viscosities", type=int, nargs="+", default=[3, 4, 5])
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument(
         "--hide-fliers",
         action="store_true",
@@ -216,8 +216,10 @@ def make_plot(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"ns2d_nu{nu}_l2_h1_boxplots.png"
+    pdf_path = output_dir / f"ns2d_nu{nu}_l2_h1_boxplots.pdf"
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88), w_pad=2.0)
     fig.savefig(out_path, dpi=dpi)
+    fig.savefig(pdf_path)
     plt.close(fig)
 
     print(f"Wrote {out_path}")

@@ -91,6 +91,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--n-plot-samples", type=int, default=4)
+    parser.add_argument("--plot-dpi", type=int, default=150)
+    parser.add_argument(
+        "--plot-format", type=str, default="jpeg", choices=["png", "jpeg"]
+    )
     parser.add_argument("--snapshot-times", type=str, default="")
     parser.add_argument(
         "--max-snapshots",
@@ -242,6 +246,8 @@ def main(args: argparse.Namespace) -> None:
         curves,
         dt,
         os.path.join(args.output_dir, f"{args.split}_rollout_error_curve.png"),
+        plot_dpi=args.plot_dpi,
+        plot_format=args.plot_format,
     )
     _plot_samples(
         model,
@@ -254,6 +260,8 @@ def main(args: argparse.Namespace) -> None:
         os.path.join(args.output_dir, f"{args.split}_sample_comparisons"),
         delta_clip=delta_clip,
         rollout_fn=rollout_fn,
+        plot_dpi=args.plot_dpi,
+        plot_format=args.plot_format,
     )
 
     summary = {
@@ -270,6 +278,8 @@ def main(args: argparse.Namespace) -> None:
         "evaluation_snapshots": eval_snapshots,
         "stored_snapshots": original_n_steps + 1,
         "delta_clip": delta_clip,
+        "plot_dpi": args.plot_dpi,
+        "plot_format": args.plot_format,
         "rollout_mode": args.rollout_mode,
         "metrics": metrics,
         "overall_rel_l2": curves["overall_rel_l2"],

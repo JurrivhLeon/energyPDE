@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory for boxplots. Defaults to ROOT/error_boxplots.",
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument("--hide-fliers", action="store_true")
     return parser.parse_args()
 
@@ -80,7 +80,9 @@ def _load_channel_errors(json_path: Path, metric_key: str) -> dict[str, np.ndarr
     }
     empty = [label for label, values in arrays.items() if values.size == 0]
     if empty:
-        raise ValueError(f"No positive finite {metric_key} entries for {empty} in {json_path}")
+        raise ValueError(
+            f"No positive finite {metric_key} entries for {empty} in {json_path}"
+        )
     return arrays
 
 
@@ -175,7 +177,7 @@ def make_plot(root: Path, output_dir: Path, dpi: int, show_fliers: bool) -> Path
     axes[0].set_ylabel(r"Aggr. rel. $L^2$ error", fontsize=18, labelpad=9)
     axes[1].set_ylabel(r"Aggr. rel. $H^1$ error", fontsize=18, labelpad=9)
 
-    #fig.suptitle(r"CFD2D per-sample channel errors, $\nu=10^{-8}$", fontsize=21, y=0.96)
+    # fig.suptitle(r"CFD2D per-sample channel errors, $\nu=10^{-8}$", fontsize=21, y=0.96)
     legend_handles = [
         Patch(facecolor=m["color"], edgecolor="black", alpha=0.72, label=m["label"])
         for m in method_data
@@ -191,8 +193,10 @@ def make_plot(root: Path, output_dir: Path, dpi: int, show_fliers: bool) -> Path
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / "cfd2d_nu8_channel_error_boxplots.png"
+    pdf_path = output_dir / "cfd2d_nu8_channel_error_boxplots.pdf"
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.93), h_pad=2.0)
     fig.savefig(out_path, dpi=dpi)
+    fig.savefig(pdf_path)
     plt.close(fig)
 
     print(f"Wrote {out_path}")
